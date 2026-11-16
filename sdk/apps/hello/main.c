@@ -1,11 +1,8 @@
 /*
- * Adds an icon to the free 5th slot of the "APP" page. Pressing ENTER on it opens a full-screen
- * overlay that shows the code of each key pressed; the back key (or ESC) closes it.
+ * Adds a "Custom app" row to the "APP" menu (Alarm, Pictures). Pressing ENTER on it opens a
+ * full-screen overlay that shows the code of each key pressed; the back key (or ESC) closes it.
  */
 #include "fw.h"
-#include "icon.h"
-
-#define APP_SLOT 4
 
 typedef struct {
 	lv_obj_t *root;
@@ -111,24 +108,43 @@ static void app_open(lv_obj_t *return_focus)
 	lv_group_focus_freeze(g, true);
 }
 
-static void slot_event_cb(lv_event_t *e)
+static void item_event_cb(lv_event_t *e)
 {
 	if (lv_event_get_code(e) == LV_EVENT_KEY && *(uint32_t *)lv_event_get_param(e) == LV_KEY_ENTER) {
 		app_open(e->current_target);
 		return;
 	}
-	page_expand_home_event_cb(e);
+	page_home_menu_event_cb(e); /* navigation and back work regardless of which row has focus */
 }
 
-/* Replaces the call to page_expand_home_create in view_page_create. */
-__attribute__((used, section(".text.entry"))) int hook_expand_home_create(void)
+/* Adds a row styled like the page's own rows (see page_home_menu_create). */
+static void add_menu_item(lv_obj_t *list, const char *symbol, const char *text)
 {
-	int ret = page_expand_home_create();
+	lv_coord_t h = lv_disp_get_ver_res(NULL);
+	lv_obj_t *item = fw_list_item_create(list);
+	lv_obj_set_height(item, h / 7);
+	lv_obj_set_style_border_side(item, LV_BORDER_SIDE_TOP | LV_BORDER_SIDE_BOTTOM, 0);
+	lv_obj_add_event_cb(item, item_event_cb, LV_EVENT_KEY, NULL);
+	lv_group_add_obj(fw_view_group(), item);
+
+	lv_obj_t *icon = lv_label_create(item);
+	lv_obj_set_style_text_font(icon, FW_FONT_ICONS, 0);
+	lv_label_set_text(icon, symbol);
+
+	lv_obj_t *label = lv_label_create(item);
+	lv_obj_set_width(label, lv_disp_get_hor_res(NULL) - 4 - lv_obj_get_width(icon));
+	lv_label_set_long_mode(label, LV_LABEL_LONG_CLIP);
+	lv_label_set_text(label, text);
+	fw_list_item_layout(item, 0, 0, 2);
+}
+
+/* Replaces the call to page_home_menu_create in view_page_create. */
+__attribute__((used, section(".text.entry"))) int hook_home_menu_create(void)
+{
+	int ret = page_home_menu_create();
 	if (ret != 0)
 		return ret;
-	lv_obj_t *slot = fw_expand_page()->slot[APP_SLOT];
-	lv_img_set_src(slot, &app_icon);
-	lv_obj_remove_event_cb(slot, page_expand_home_event_cb);
-	lv_obj_add_event_cb(slot, slot_event_cb, LV_EVENT_KEY, NULL);
+	lv_obj_t *list = lv_obj_get_parent(fw_home_menu_page()->item[0]);
+	add_menu_item(list, "\xEF\x80\x8C" /* U+F00C check mark */, "Custom app");
 	return 0;
 }

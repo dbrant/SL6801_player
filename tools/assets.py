@@ -514,9 +514,10 @@ def cmd_pack(fw, work, out, app_json=None):
             runs.append([s, s + 1])
     log(f"wrote {out}")
     if runs:
-        args = " ".join(f"write_flash {a * 0x1000:#x} {a * 0x1000:#x} {(b - a) * 0x1000:#x} {os.path.basename(out)}"
-                        for a, b in runs)
-        log(f"flash only the changed sectors (bootloader mode):\n  smtlink_dump init {args}")
+        # Write the whole image: smtlink_dump skips sectors whose contents already match. Upstream
+        # smtlink_dump ignores the file offset of write_flash, so per-range writes would be wrong.
+        log("changed ranges: " + ", ".join(f"{a * 0x1000:#x}-{b * 0x1000:#x}" for a, b in runs))
+        log(f"flash (bootloader mode):\n  smtlink_dump init write_flash 0 0 0 {os.path.basename(out)}")
 
 
 def cmd_preview(fw, font_name, texts, out, scale=3):

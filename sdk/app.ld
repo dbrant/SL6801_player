@@ -1,5 +1,5 @@
-/* Injected code lives in free flash (offset 0x1D0000) and runs in place at 0xC00000 + offset. */
-ENTRY(hook_expand_home_create)
+/* Injected code lives in free flash (offset 0x1D0000) and runs in place at 0xC00000 + offset.
+ * build.py sets the entry symbol to the app's first patch target. */
 
 MEMORY
 {

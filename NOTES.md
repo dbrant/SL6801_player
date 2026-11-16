@@ -158,8 +158,11 @@ its `boot` block (0x81FBC0+) is the bootloader proper.
   (view context at `*(0x81CE5C)`: key group at +0x30, APP page state at +0x1D4).
 - `sdk/app.ld`: code at flash `0x1D0000` (runs at `0xDD0000`), up to `0x1FC000`. `.data`/`.bss`
   must be empty; keep state in `lv_mem_alloc` memory.
-- `sdk/build.py <app dir>`: compiles with `zig cc` (ziglang pip package, Thumb-2, Cortex-M4,
-  soft-float ABI) and writes `build/app.bin` + `build/app.json`. `patches.json` lists BL call
+- `sdk/build.py [--zig] <app dir>`: compiles with arm-none-eabi-gcc (xPack 15.2.1 in
+  `C:/Tools/arm-gnu-toolchain`, override with `ARM_GCC_BIN`) or with `zig cc` (ziglang pip
+  package). Thumb-2, Cortex-M4, soft-float ABI. Writes `build/app.bin`, `build/app.json`, and with
+  gcc also `app.map` and `app.lst` (disassembly with source). `sdk/src/*.c` is linked into every
+  app (memset/memcpy/memmove/strlen). `patches.json` lists BL call
   sites to redirect to app symbols, with the expected original target as a safety check.
 - `tools/assets.py pack firmware_2M.bin work out.bin --app <app dir>/build/app.json`: writes the
   code and patches the BLs. Asset data then only uses `0x186000` up to the app.
@@ -167,11 +170,17 @@ its `boot` block (0x81FBC0+) is the bootloader proper.
 
 ### Hook used by `sdk/apps/hello`
 
-`view_page_create` (0xD04A1C) is a switch calling each page's create function. The APP page
-(id 0x51, `page_expand_home_create`) is a 2x3 grid of image slots where slots 4 and 5 are empty.
-The `bl` at `0xD04BF8` is redirected to `hook_expand_home_create`, which calls the original,
-puts an icon into slot 4 and swaps its event callback. ENTER on it opens a full-screen object on
-`lv_layer_top()`, added to the view's key group, focused and with the group frozen.
+`view_page_create` (0xD04A1C) is a switch calling each page's create function. The home grid's
+"APP" item opens page 0x53, `page_home_menu_create`: a list with Alarm and Pictures (string ids
+7 and 4), rows made by `fw_list_item_create` (0xD0267C) with a FontAwesome symbol label
+(font `0xC810C4`) and a text label. The `bl` at `0xD04C04` is redirected to
+`hook_home_menu_create`, which calls the original and appends a "Custom app" row with its own key
+handler (ENTER opens the app, other keys go to `page_home_menu_event_cb`). The app is a
+full-screen object on `lv_layer_top()`, added to the view's key group, focused, with the group
+frozen.
+
+Page 0x51 (`page_expand_home_create`, a 2x3 icon grid with 4 icons) is not reachable from the
+UI on this model.
 
 Key codes seen in page handlers: 9/11 NEXT/PREV, 10 ENTER, 19/20 RIGHT/LEFT, 27 ESC, and vendor
 codes 0x81 (leave page; "down" on the home grid), 0x87, 0x8A, 0x92, 0x98, 0x9B, 0xA0, 0xA3.
@@ -181,3 +190,19 @@ codes 0x81 (leave page; "down" on the home grid), 0x87, 0x8A, 0x92, 0x98, 0x9B, 
 `ghidra/decompile.sh app out.c <name|0xaddr>...` decompiles functions from the saved project.
 `SL6801Fixups.java` clears the "no return" flag from `rom_printf` (0x2B0, a boot ROM function;
 the ROM block is filled with `bx lr` stubs until it is dumped).
+
+## Flashing from Windows
+
+- Driver: in bootloader mode the device (`301A:2800`) binds to Windows' USB mass-storage driver.
+  Zadig (Options > List All Devices) replaced it with WinUSB for that VID/PID only; card reader
+  mode (`301A:2801`) is unaffected.
+- `smartlink_flash/` (not in git) is a clone of github.com/ilyakurdyukov/smartlink_flash (commit
+  49d51d1) with `patches/smtlink_dump-write_flash-offset.patch` applied (`git apply`), built
+  in MSYS2 UCRT64 (`pacman -S mingw-w64-ucrt-x86_64-libusb make`, then `make CC=gcc` from a UCRT64
+  shell). `libusb-1.0.dll` is copied next to `smtlink_dump.exe` so it runs from any shell.
+- Upstream bug: `write_flash <addr> <file_offset> <size> <file>` ignores `<file_offset>` and always
+  takes data from the start of the file. The local copy is patched (`mem[src_offs + i + j]` in
+  `write_flash()`). Flashing a whole image with `write_flash 0 0 0 image.bin` works either way and
+  only rewrites sectors that differ.
+- In bootloader mode always start with `init`, e.g.
+  `smartlink_flash/smtlink_dump.exe init flash_id read_flash 0 2M backup.bin`.

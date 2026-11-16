@@ -151,12 +151,30 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
 #define FW_VIEW_CTX (*(uint8_t **)0x0081CE5C)
 #define fw_view_group() (*(lv_group_t **)(FW_VIEW_CTX + 0x30))
 
-/* "APP" page (page id 0x51): 2x3 grid of image slots; slots 4 and 5 are unused by the firmware. */
+#define lv_obj_get_parent(obj) (*(lv_obj_t **)((uint8_t *)(obj) + 4))
+#define lv_obj_get_width FW_FN(0x00D2B4C2, lv_coord_t, (lv_obj_t * obj))
+#define lv_obj_set_style_border_side FW_FN(0x00D2E164, void, (lv_obj_t * obj, uint8_t v, lv_style_selector_t s))
+#define LV_LABEL_LONG_SCROLL_CIRCULAR 3
+#define LV_LABEL_LONG_CLIP 4
+#define LV_BORDER_SIDE_BOTTOM 1
+#define LV_BORDER_SIDE_TOP 2
+
+/* Vendor list helpers used by the menu pages. */
+#define fw_list_item_create FW_FN(0x00D0267C, lv_obj_t *, (lv_obj_t * list)) /* full-width bordered row */
+#define fw_list_item_layout FW_FN(0x00D32618, void, (lv_obj_t * obj, int main, int cross, int track)) /* flex */
+#define FW_FONT_ICONS ((const lv_font_t *)0x00C810C4) /* 24 FontAwesome symbols (U+F001...) */
+
+/* "APP" page (page id 0x53), opened from the home grid: a list of Alarm and Pictures. */
 typedef struct {
-	lv_obj_t *slot[6];
-	lv_obj_t *label;
-} fw_expand_page_t;
-#define fw_expand_page() (*(fw_expand_page_t **)(FW_VIEW_CTX + 0x1D4))
-#define page_expand_home_create FW_FN(0x00D0F26C, int, (void))
-#define page_expand_home_event_cb FW_FN(0x00D0F110, void, (lv_event_t * e))
-#define FW_CALL_EXPAND_HOME_CREATE 0x00D04BF8 /* "bl page_expand_home_create" in view_page_create */
+	lv_obj_t *item[2];
+	lv_obj_t *text[2];
+	lv_obj_t *icon[2];
+	uint8_t sel;
+} fw_home_menu_page_t;
+#define fw_home_menu_page() (*(fw_home_menu_page_t **)(FW_VIEW_CTX + 0x1DC))
+#define page_home_menu_create FW_FN(0x00D0FC64, int, (void))
+#define page_home_menu_event_cb FW_FN(0x00D0FB2C, void, (lv_event_t * e))
+#define FW_CALL_HOME_MENU_CREATE 0x00D04C04 /* "bl page_home_menu_create" in view_page_create */
+
+/* Page 0x51 (page_expand_home_create, 2x3 icon grid) exists in the code but is not reachable
+ * from the UI on this model. */
