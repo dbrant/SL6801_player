@@ -1,0 +1,12 @@
+{
+ "_info": {
+  "bpp": 1,
+  "glyphs": 15,
+  "line_height": 26,
+  "base_line": 0,
+  "baseline_ofs": 5,
+  "ui_font": false
+ },
+ "chars": ".0123456789",
+ "rebuild": null
+}
