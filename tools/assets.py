@@ -371,7 +371,45 @@ def build_font(d, fnt, cfg, alloc, extra_chars, log):
     return set(glyphs)
 
 
-def cmd_pack(fw, work, out):
+def encode_bl(pc, target):
+    """Thumb-2 BL (T1) from pc to target, as the two little-endian halfwords."""
+    off = target - (pc + 4)
+    if not -(1 << 24) <= off < (1 << 24) or off & 1:
+        raise ValueError(f"BL target {target:#x} out of range from {pc:#x}")
+    s = (off >> 24) & 1
+    i1, i2 = (off >> 23) & 1, (off >> 22) & 1
+    j1, j2 = (1 - i1) ^ s, (1 - i2) ^ s
+    hw1 = 0xF000 | (s << 10) | ((off >> 12) & 0x3FF)
+    hw2 = 0xD000 | (j1 << 13) | (j2 << 11) | ((off >> 1) & 0x7FF)
+    return struct.pack("<HH", hw1, hw2)
+
+
+def apply_app(d, orig, app_json, free_start, free_end, log):
+    """Place an sdk/build.py app in flash and redirect its BL call sites. Returns the new free_end."""
+    from xref import decode_bl
+    with open(app_json) as f:
+        app = json.load(f)
+    code = open(app["bin"], "rb").read()
+    off = int(app["flash_offset"], 16)
+    if off < free_start or off + len(code) > free_end:
+        raise SystemExit(f"app at {off:#x}+{len(code):#x} is outside the free area {free_start:#x}-{free_end:#x}")
+    if any(b != 0xFF for b in orig[off:off + len(code)]):
+        raise SystemExit(f"flash at {off:#x} is not empty in the original image")
+    d[off:off + len(code)] = code
+    log(f"app: {len(code)} bytes at flash {off:#x} ({FLASH + off:#x})")
+    for p in app["patches"]:
+        at, target = int(p["bl_at"], 16), int(p["target"], 16)
+        o = at - FLASH
+        hw1, hw2 = struct.unpack_from("<HH", orig, o)
+        cur = decode_bl(hw1, hw2, at)
+        if cur is None or cur[0] != "bl" or (p.get("expect") and cur[1] != int(p["expect"], 16)):
+            raise SystemExit(f"unexpected instruction at {at:#x}: {orig[o:o + 4].hex()}")
+        d[o:o + 4] = encode_bl(at, target)
+        log(f"  bl at {at:#x}: {cur[1]:#x} -> {p['symbol']} ({target:#x})")
+    return off
+
+
+def cmd_pack(fw, work, out, app_json=None):
     img = Image(open(fw, "rb").read())
     d = img.data  # edit the image's own buffer so fix_checksums sees the changes
     with open(os.path.join(work, "manifest.json"), encoding="utf-8") as f:
@@ -400,7 +438,11 @@ def cmd_pack(fw, work, out):
         changes += 1
     tone_part = img.part("TONE")
     start = (tone_part["off"] + tone_part["size"] + 0xFFF) // 0x1000 * 0x1000
-    alloc = Allocator(d, start, img.part("PSMP")["off"])
+    end = img.part("PSMP")["off"]
+    if app_json:
+        end = apply_app(d, orig, app_json, start, end, log)
+        changes += 1
+    alloc = Allocator(d, start, end)
 
     # Strings
     codes, table = read_strings(orig)
@@ -511,6 +553,7 @@ def main():
     p.add_argument("firmware")
     p.add_argument("workdir")
     p.add_argument("output")
+    p.add_argument("--app", help="app.json from sdk/build.py to inject")
     v = sub.add_parser("preview", help="render text with a firmware font to PNG")
     v.add_argument("firmware")
     v.add_argument("font", help=f"font name from the workdir, e.g. {UI_FONT}")
@@ -520,7 +563,7 @@ def main():
     if a.cmd == "unpack":
         cmd_unpack(a.firmware, a.workdir)
     elif a.cmd == "pack":
-        cmd_pack(a.firmware, a.workdir, a.output)
+        cmd_pack(a.firmware, a.workdir, a.output, a.app)
     else:
         cmd_preview(a.firmware, a.font, a.text, a.output)
 

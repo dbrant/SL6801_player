@@ -1,0 +1,14 @@
+{
+ "bin": "E:\\Desktop\\mp3player\\sdk\\apps\\hello\\build\\app.bin",
+ "load": "0xdd0000",
+ "flash_offset": "0x1d0000",
+ "size": 5922,
+ "patches": [
+  {
+   "bl_at": "0xd04bf8",
+   "target": "0xdd0000",
+   "symbol": "hook_expand_home_create",
+   "expect": "0xd0f26c"
+  }
+ ]
+}

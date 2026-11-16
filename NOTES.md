@@ -150,3 +150,34 @@ the vendor firmware is known to use that area, but this has not been confirmed o
 First run: the app has 4811 functions, 354 named from `__func__` strings (LVGL core, vendor pages,
 key manager, etc.). The boot program also disassembles parts of the app in the flash block; only
 its `boot` block (0x81FBC0+) is the bootloader proper.
+
+## Code injection (SDK)
+
+- `sdk/include/fw.h`: firmware API. LVGL v8.3 functions by address (called through constant
+  function pointers), style setters, group/event helpers, the UI font, and vendor hooks
+  (view context at `*(0x81CE5C)`: key group at +0x30, APP page state at +0x1D4).
+- `sdk/app.ld`: code at flash `0x1D0000` (runs at `0xDD0000`), up to `0x1FC000`. `.data`/`.bss`
+  must be empty; keep state in `lv_mem_alloc` memory.
+- `sdk/build.py <app dir>`: compiles with `zig cc` (ziglang pip package, Thumb-2, Cortex-M4,
+  soft-float ABI) and writes `build/app.bin` + `build/app.json`. `patches.json` lists BL call
+  sites to redirect to app symbols, with the expected original target as a safety check.
+- `tools/assets.py pack firmware_2M.bin work out.bin --app <app dir>/build/app.json`: writes the
+  code and patches the BLs. Asset data then only uses `0x186000` up to the app.
+- `tools/img2c.py`: PNG to `lv_img_dsc_t` C header. `tools/xref.py`: find BL/B.W callers.
+
+### Hook used by `sdk/apps/hello`
+
+`view_page_create` (0xD04A1C) is a switch calling each page's create function. The APP page
+(id 0x51, `page_expand_home_create`) is a 2x3 grid of image slots where slots 4 and 5 are empty.
+The `bl` at `0xD04BF8` is redirected to `hook_expand_home_create`, which calls the original,
+puts an icon into slot 4 and swaps its event callback. ENTER on it opens a full-screen object on
+`lv_layer_top()`, added to the view's key group, focused and with the group frozen.
+
+Key codes seen in page handlers: 9/11 NEXT/PREV, 10 ENTER, 19/20 RIGHT/LEFT, 27 ESC, and vendor
+codes 0x81 (leave page; "down" on the home grid), 0x87, 0x8A, 0x92, 0x98, 0x9B, 0xA0, 0xA3.
+
+### Ghidra helpers
+
+`ghidra/decompile.sh app out.c <name|0xaddr>...` decompiles functions from the saved project.
+`SL6801Fixups.java` clears the "no return" flag from `rom_printf` (0x2B0, a boot ROM function;
+the ROM block is filled with `bx lr` stubs until it is dumped).
