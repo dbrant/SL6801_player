@@ -1,6 +1,6 @@
 /*
  * "Key test" entry in the APP menu: a full-screen overlay that shows the code of each key pressed.
- * The back key (or ESC) closes it.
+ * Two back keys (or ESC) in a row close it, so a single back key's code can be seen too.
  */
 #include "sdk.h"
 
@@ -8,6 +8,7 @@ typedef struct {
 	fw_overlay_t *ov;
 	lv_obj_t *keys;
 	uint32_t presses;
+	uint32_t last;
 } app_t;
 
 static void on_delete(void *ctx)
@@ -19,15 +20,19 @@ static void key_cb(lv_event_t *e)
 {
 	app_t *app = lv_event_get_user_data(e);
 	uint32_t key = *(uint32_t *)lv_event_get_param(e);
-	if (key == FW_KEY_BACK || key == LV_KEY_ESC) {
+	bool back = key == FW_KEY_BACK || key == LV_KEY_ESC;
+	if (back && app->last == key) {
 		fw_overlay_close(app->ov);
 		return;
 	}
-	char buf[48];
+	app->last = key;
+	char buf[64];
 	char *p = fw_put_str(buf, "key ");
 	p = fw_put_hex(p, key, 2);
 	p = fw_put_str(p, "\npresses: ");
-	fw_put_dec(p, ++app->presses);
+	p = fw_put_dec(p, ++app->presses);
+	if (back)
+		fw_put_str(p, "\nBack again closes.");
 	lv_label_set_text(app->keys, buf); /* copies the text */
 }
 
@@ -37,6 +42,7 @@ static void open(lv_obj_t *return_focus)
 	if (!app)
 		return;
 	app->presses = 0;
+	app->last = 0;
 	app->ov = fw_overlay_open(return_focus, lv_rgb(0x10, 0x20, 0x60), on_delete, app);
 	if (!app->ov) {
 		lv_mem_free(app);
@@ -45,7 +51,7 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_t *root = app->ov->root;
 
 	lv_obj_align(fw_label(root, "Key test", lv_rgb(0xFF, 0xD0, 0x40)), LV_ALIGN_TOP_MID, 0, 4);
-	app->keys = fw_label(root, "Press any key.\nBack closes.", lv_rgb(0xFF, 0xFF, 0xFF));
+	app->keys = fw_label(root, "Press any key.\nBack twice closes.", lv_rgb(0xFF, 0xFF, 0xFF));
 	lv_obj_set_style_text_align(app->keys, LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_align(app->keys, LV_ALIGN_CENTER, 0, 0);
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);

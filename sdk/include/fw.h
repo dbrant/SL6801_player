@@ -76,6 +76,33 @@ typedef void (*lv_event_cb_t)(lv_event_t *e);
 #define FW_KEY_CENTER LV_KEY_ENTER
 #define FW_KEY_LEFT LV_KEY_LEFT
 #define FW_KEY_RIGHT LV_KEY_RIGHT
+/* Holding a button sends _LONG once, then _REPEAT a few times per second, then _LONG_UP on
+ * release (from the keypad driver at 0xD02018). Center only sends FW_KEY_CENTER_LONG, and only
+ * while the focused object has FW_OBJ_FLAG_CENTER_LONG (see sdk/src/keys.c); otherwise holding it
+ * powers the player off. FW_KEY_BACK_LONG needs FW_OBJ_FLAG_BACK_LONG; otherwise holding Back
+ * opens the volume control. */
+#define FW_KEY_BACK_LONG 0x82
+#define FW_KEY_BACK_LONG_UP 0x83
+#define FW_KEY_BACK_REPEAT 0x84
+#define FW_KEY_LEFT_LONG 0x85
+#define FW_KEY_LEFT_LONG_UP 0x86
+#define FW_KEY_LEFT_REPEAT 0x87
+#define FW_KEY_RIGHT_LONG 0x88
+#define FW_KEY_RIGHT_LONG_UP 0x89
+#define FW_KEY_RIGHT_REPEAT 0x8A
+#define FW_KEY_CENTER_LONG 0x8B
+#define FW_KEY_CENTER_LONG_UP 0x8C /* not sent on this player */
+#define FW_KEY_CENTER_REPEAT 0x8D  /* not sent on this player */
+#define FW_KEY_UP_LONG 0xA1
+#define FW_KEY_UP_LONG_UP 0xA2
+#define FW_KEY_UP_REPEAT 0xA3
+
+/* Key manager (FUN_00CDD5C0): readiness check (0x5A once keys are being handled), its state
+ * (1 while the screen is on), and the call it uses to hand a (key id, event) pair to the keypad
+ * driver, which holds one pending pair. */
+#define fw_key_ready FW_FN(0x00CF09D4, uint8_t, (void))
+#define FW_KEY_STATE (*(volatile const uint8_t *)0x0081BC50u)
+#define fw_key_forward FW_FN(0x00D0227C, void, (uint8_t id, uint8_t event))
 
 #define LV_ALIGN_TOP_MID 2
 #define LV_ALIGN_CENTER 9
@@ -88,6 +115,9 @@ typedef void (*lv_event_cb_t)(lv_event_t *e);
 #define LV_OBJ_FLAG_HIDDEN (1u << 0)
 #define LV_OBJ_FLAG_CLICKABLE (1u << 1)
 #define LV_OBJ_FLAG_SCROLLABLE (1u << 4)
+#define LV_OBJ_FLAG_USER_1 (1u << 27) /* bits 27-30 are free for applications */
+#define LV_OBJ_FLAG_USER_2 (1u << 28)
+#define lv_obj_flags(obj) (*(volatile const uint32_t *)((const uint8_t *)(obj) + 0x1C))
 
 typedef struct _lv_timer_t {
 	uint32_t period;

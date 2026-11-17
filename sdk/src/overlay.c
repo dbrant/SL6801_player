@@ -24,6 +24,7 @@ fw_overlay_t *fw_overlay_open(lv_obj_t *return_focus, lv_color_t bg, void (*on_d
 	lv_obj_set_pos(root, 0, 0);
 	lv_obj_set_size(root, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
 	lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
+	lv_obj_add_flag(root, FW_OBJ_FLAG_CENTER_LONG | FW_OBJ_FLAG_BACK_LONG);
 	lv_obj_set_style_radius(root, 0, 0);
 	lv_obj_set_style_border_width(root, 0, 0);
 	lv_obj_set_style_pad_top(root, 0, 0);

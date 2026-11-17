@@ -1,6 +1,6 @@
 /*
  * Flutter: guide a puffball through gaps between crystal pillars.
- * Center flaps, Back exits. Runs as a full-screen overlay opened from the APP menu.
+ * Center flaps, holding Back exits. Runs as a full-screen overlay opened from the APP menu.
  *
  * Positions and speeds are fixed point with 4 fractional bits; the simulation runs in fixed
  * 33 ms steps driven by an LVGL timer, catching up if the timer fires late.
@@ -157,7 +157,7 @@ static void reset(game_t *g)
 	set_bird_src(g, &img_bird_down);
 	lv_obj_set_pos(g->bird, BIRD_X, (lv_coord_t)(g->y / FP));
 	set_score_text(g);
-	show_message(g, "Flutter", "Center: flap\nBack: exit");
+	show_message(g, "Flutter", "Center: flap\nHold Back: exit");
 }
 
 static void flap(game_t *g)
@@ -313,7 +313,7 @@ static void input_cb(lv_event_t *e)
 	if (code != LV_EVENT_KEY)
 		return;
 	uint32_t key = *(uint32_t *)lv_event_get_param(e);
-	if (key == FW_KEY_BACK || key == LV_KEY_ESC) {
+	if (key == FW_KEY_BACK_LONG) { /* a short Back is ignored, so it can't end a game by accident */
 		fw_overlay_close(g->ov); /* frees g via on_delete */
 		return;
 	}

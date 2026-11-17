@@ -12,7 +12,7 @@ What works so far, all tested on the device:
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
 - **Apps**: *Key test* (shows key codes), *Flutter* (a side-scrolling flapping game) and
   *Mp3tris* (a falling-block puzzle).
-- **Flashing from Windows** over USB with a patched build of `smtlink_dump`.
+- **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
   scripts.
 
@@ -77,7 +77,6 @@ To restore the stock firmware, flash `firmware_2M.bin` (or the backup) the same 
 | `sdk/apps/keytest`, `flutter`, `mp3tris` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
-| `patches/` | Fix for the upstream `smtlink_dump` (see [Gotchas](#gotchas)) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
 
 ## Workflows
@@ -144,9 +143,8 @@ writes the partitions; `slfw.py <image> fixcrc <out>` recomputes the checksums.
    It enumerates as `301A:2800`.
 2. Run `smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin`.
 
-Always flash the whole image with `write_flash 0 0 0 <file>`. Only sectors that differ are
-rewritten, so this is fast. Don't use per-region `write_flash` commands with the upstream tool
-(see [Gotchas](#gotchas)).
+Flash the whole image with `write_flash 0 0 0 <file>`. Only sectors that differ are rewritten,
+so this is fast.
 
 The USB bootloader is in the chip's boot ROM, so a bad flash can always be recovered by
 flashing a good image again. This has happened once and was recovered this way.
@@ -386,7 +384,9 @@ place.
   (font `0xC810C4`) and a text label. The page state is at `*(0x81CE5C) + 0x1DC`.
 - `sdk/patches.json` redirects the `bl page_home_menu_create` at `0xD04C04` in `view_page_create`
   to `hook_home_menu_create`. The hook calls the original, then appends one row per
-  `FW_MENU_ITEM`.
+  `FW_MENU_ITEM`. Its second entry installs the Center long-press hook (see
+  [Buttons and key events](#buttons-and-key-events)). The build keeps every patch target when it
+  discards unused code.
 - The linker script collects the `FW_MENU_ITEM` entries between `__fw_menu_start` and
   `__fw_menu_end`.
 - Each row's key handler opens the app on ENTER and passes other keys to
@@ -549,8 +549,8 @@ it frees its buffers and closes the file between stopping its task and closing t
 
 **Don't touch `/dev/audio0` from the UI task.** The UI runs in `watch_view_task` (0xCD8FE0),
 which calls `lv_timer_handler` (0xD39FC8) in a loop; app timers and key events run inside it.
-Measured with the Sound test app (`sdk/apps/soundtest`, which runs each step from a UI timer and
-logs it on screen first):
+Measured with an earlier version of the Sound test app, which ran each device call from a UI
+timer and logged it on screen first:
 - a write from the UI task that has to wait for ring space hangs for about 10 s and then reboots,
   every time;
 - opening or closing from the UI task sometimes crashes, even with nothing played;
@@ -559,7 +559,8 @@ logs it on screen first):
 The same writes from a separate task always worked. The cause isn't known. The music player
 opens, writes and closes from its own task. The video player opens and closes from presenter
 code, outside LVGL timers and events. Do all device calls from your own task, and finish from a
-UI timer once that task is done.
+UI timer once that task is done. The Sound test app (`sdk/apps/soundtest`) now only checks the SDK
+sound module: it opens it, beeps and closes it three times, logging each step.
 
 **Volume.** `fw_audio_volume()` (0xCDF884) returns the user's volume in the low byte. The video
 player scales samples with `fw_gain_apply(gain, volume, buf, frames)` (0xD47C10) on a gain object
@@ -592,15 +593,61 @@ Whether the music player keeps the device open while paused or stopped hasn't be
 
 ### Buttons and key events
 
-Measured with the Key test app:
+The keypad driver's read callback (`FUN_00D02018`) turns the key manager's (key id, event)
+pairs into the codes below. Short presses and the Left, Right and Up long presses were measured
+with the Key test app; the rest come from the driver code.
+- **Holding a key** sends the long-start code once, then the repeat code a few times per second,
+  then the long-release code when the key is let go.
+- **`fw.h` names:** `FW_KEY_<KEY>` for the short press, plus `_LONG`, `_REPEAT` and `_LONG_UP`.
 
-| Button | `LV_EVENT_KEY` code | `fw.h` name |
-|---|---|---|
-| Left | 0x14 (`LV_KEY_LEFT`) | `FW_KEY_LEFT` |
-| Right | 0x13 (`LV_KEY_RIGHT`) | `FW_KEY_RIGHT` |
-| Top | 0xA0 | `FW_KEY_UP` |
-| Center | 0x0A (`LV_KEY_ENTER`) | `FW_KEY_CENTER` |
-| Bottom | 0x81 (the firmware's "leave page") | `FW_KEY_BACK` |
+| Button | Key id | Short | Long start | Repeat | Long release | `fw.h` name |
+|---|---|---|---|---|---|---|
+| Left | 0x42 | 0x14 (`LV_KEY_LEFT`) | 0x85 | 0x87 | 0x86 | `FW_KEY_LEFT` |
+| Right | 0x43 | 0x13 (`LV_KEY_RIGHT`) | 0x88 | 0x8A | 0x89 | `FW_KEY_RIGHT` |
+| Top | 0x25 | 0xA0 | 0xA1 | 0xA3 | 0xA2 | `FW_KEY_UP` |
+| Center | 0x21 | 0x0A (`LV_KEY_ENTER`) | 0x8B | (0x8D) | (0x8C) | `FW_KEY_CENTER` |
+| Bottom | 0x45 | 0x81 (the firmware's "leave page") | 0x82 | 0x84 | 0x83 | `FW_KEY_BACK` |
+
+The driver also maps keys this player doesn't have:
+- 0x20: `LV_KEY_DOWN`, long 0x99/0x9B/0x9A;
+- 0x22: `LV_KEY_UP`, long 0x96/0x98/0x97;
+- 0x34 "record": 0x92, long 0x93/0x95/0x94.
+
+The key manager (`FUN_00CDD5C0`, a state machine logging "key status is work" and so on) names
+some other ids: 0x23/0x24 volume down/up, 0x37 "onoff" and 0x47 "power". Its state byte is at
+0x81BC50 (1 = screen on), and it hands keys to the keypad driver with `FUN_00D0227C(id, event)`.
+The driver holds a single pending pair (at 0x823DF4).
+
+**Back long press.** With the screen on, the key manager opens the volume control on a Back long
+start (`FUN_00CDD5C0`, branch at 0xCDDD08) instead of passing it on. While the volume control is
+open, Left/Right adjust the volume. Back's repeat and long release reach the keypad driver
+normally.
+
+**Center is different.** Its button goes through the power management chip, which reports only
+three raw events to the key manager: press (1), short release (2), and long hold (4). The key
+manager turns 4 into a press of the "power" key (0x47), which powers the player off when the
+status byte read by `FUN_00D27A5C` is 0 or 1, and turns the screen off for 2 to 5. That byte is
+firmware state (at 0x81D14C) with its own dispatcher (`FUN_00D27158`), probably Bluetooth, so the
+SDK leaves it alone. So Center never produces repeat or long-release codes, and holding it powers
+the player off.
+
+The SDK patches the key manager's "keys ready" check (`bl 0xCF09D4` at 0xCDD5E6, entry in
+`sdk/patches.json`) to `hook_key_event` (`sdk/src/keys.c`):
+- If the focused object has `FW_OBJ_FLAG_CENTER_LONG` (`LV_OBJ_FLAG_USER_1`), the hook rewrites
+  raw event 4 as a Center long start (0x21, 0x40), which arrives as `FW_KEY_CENTER_LONG` (0x8B).
+  Confirmed on the device; no repeat or release code follows.
+- If the focused object has `FW_OBJ_FLAG_BACK_LONG` (`LV_OBJ_FLAG_USER_2`) and the screen is on,
+  the hook passes a Back long start straight to the keypad driver, so the app gets
+  `FW_KEY_BACK_LONG` (0x82). It then replaces the event with raw 0, an unknown key that the key
+  manager ignores, so the volume control doesn't open.
+- SDK overlays set both flags on their root. Clear a flag on `ov->root` to restore the firmware's
+  action.
+- Not yet confirmed: whether the power chip forces the player off after an even longer Center
+  hold.
+
+The games exit on `FW_KEY_BACK_LONG` and ignore a short Back, so a stray press doesn't end a
+game. In Mp3tris, every Center code except a release drops the piece one row: the press, and
+`FW_KEY_CENTER_LONG` or `_REPEAT`. A press on a landed piece locks it.
 
 Center (ENTER) works differently from the others:
 - `LV_EVENT_PRESSED` arrives when it goes down.
@@ -610,8 +657,8 @@ For an immediate reaction, act on `PRESSED`. Use the `KEY` event only as a fallb
 `PRESSED` came first; Flutter and Mp3tris both do this. Event codes in this build: PRESSED 1,
 RELEASED 8, KEY 13, DELETE 33.
 
-Other key codes seen in page handlers: 9/11 NEXT/PREV, 27 ESC, and vendor codes 0x87, 0x8A, 0x92,
-0x98, 0x9B, 0xA3.
+Page handlers also check 9/11 (NEXT/PREV), 27 (ESC), and the repeat codes 0x87, 0x8A, 0x98, 0x9B
+and 0xA3 and record code 0x92 from the table above.
 
 ### Ghidra
 
@@ -632,8 +679,9 @@ Other key codes seen in page handlers: 9/11 NEXT/PREV, 27 ESC, and vendor codes 
 - **Driver.** In bootloader mode the device (`301A:2800`) binds to Windows' USB mass-storage
   driver. In Zadig, use Options > List All Devices and replace that driver with WinUSB for this
   VID/PID only. Card reader mode (`301A:2801`) is unaffected.
-- **Flasher.** `smartlink_flash/` is a clone of github.com/ilyakurdyukov/smartlink_flash (commit
-  49d51d1) with `patches/smtlink_dump-write_flash-offset.patch` applied using `git apply`.
+- **Flasher.** `smartlink_flash/` is a clone of github.com/ilyakurdyukov/smartlink_flash. Use a
+  version that includes the `write_flash` file offset fix; older builds ignore `<file_offset>`,
+  which only matters when writing selected regions of an image.
 - **Building it.** In MSYS2 UCRT64, run `pacman -S mingw-w64-ucrt-x86_64-libusb make`, then
   `make CC=gcc` from a UCRT64 shell. Copy `libusb-1.0.dll` next to `smtlink_dump.exe` so it runs
   from any shell.
@@ -642,11 +690,6 @@ Other key codes seen in page handlers: 9/11 NEXT/PREV, 27 ESC, and vendor codes 
 
 ## Gotchas
 
-- **Upstream `smtlink_dump` bug.** `write_flash <addr> <file_offset> <size> <file>` ignores
-  `<file_offset>` and always takes data from the start of the file. Writing selected regions of an
-  image with it puts the image header into those sectors and the device won't boot.
-  - The local copy is patched (`mem[src_offs + i + j]` in `write_flash()`).
-  - Flashing the whole image with `write_flash 0 0 0` is correct either way.
 - **No writable globals in apps** (see [Writing a new app](#writing-a-new-app)).
 - **Center's KEY event comes on release**; use `LV_EVENT_PRESSED` for responsiveness.
 - **`LV_EVENT_DELETE` is 33** in this build (not 34).

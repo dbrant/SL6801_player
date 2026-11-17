@@ -155,17 +155,24 @@ int main(void)
 	int y0 = G->py;
 	advance(1700);
 	printf("fell %d rows in 1.7 s\n", G->py - y0);
-	/* Soft drop until it locks. */
+	/* Each Center press (PRESSED, then KEY on release) and each long code drops one row. */
+	y0 = G->py;
 	send(LV_EVENT_PRESSED, 0);
-	int t = 0;
-	uint8_t first = G->type;
-	while (G->type == first && t < 3000) {
-		advance(16);
-		t += 16;
-	}
-	printf("soft drop locked after %d ms, soft now %d, score %u\n", t, G->soft, (unsigned)G->score);
-	send(LV_EVENT_RELEASED, 0);
 	key(LV_KEY_ENTER);
+	printf("one press: %d row(s)\n", G->py - y0);
+	y0 = G->py;
+	key(FW_KEY_CENTER_LONG);
+	key(FW_KEY_CENTER_REPEAT);
+	printf("long + repeat: %d row(s)\n", G->py - y0);
+	/* Press until it locks: the press after landing locks it. */
+	int presses = 0;
+	uint8_t first = G->type;
+	while (G->type == first && presses < 40) {
+		send(LV_EVENT_PRESSED, 0);
+		key(LV_KEY_ENTER);
+		presses++;
+	}
+	printf("locked after %d presses, score %u\n", presses, (unsigned)G->score);
 	print_board("after first lock");
 
 	/* Line clear: fill the bottom 3 rows except column 0, then drop an I vertically there. */
@@ -212,6 +219,8 @@ int main(void)
 	send(LV_EVENT_PRESSED, 0);
 	printf("state after delay + press: %d, score %u best %u\n", G->state, (unsigned)G->score, (unsigned)G->best);
 	key(FW_KEY_BACK);
-	printf("closed %d, invalidations %d\n", closed, invalidations);
+	printf("short Back: closed %d\n", closed);
+	key(FW_KEY_BACK_LONG);
+	printf("long Back: closed %d, invalidations %d\n", closed, invalidations);
 	return 0;
 }

@@ -1,6 +1,7 @@
 /*
- * Mp3tris: falling-block puzzle. Left/Right move, Up rotates, holding Center drops faster,
- * Back exits. Runs as a full-screen overlay opened from the APP menu.
+ * Mp3tris: falling-block puzzle. Left/Right move, Up rotates, each Center press (and the long
+ * press code) drops the piece one row, holding Back exits. Runs as a full-screen overlay opened
+ * from the APP menu.
  *
  * The board and the next-piece preview are 16-color images in RAM that are redrawn in place;
  * one object per cell would not fit in the 40 KB LVGL heap.
@@ -19,9 +20,7 @@
 
 #define TICK_MS 16
 #define MAX_DT 100
-#define SOFT_MS 35        /* fall interval while Center is held */
 #define LOCK_MS 450       /* time a landed piece can still move */
-#define SOFT_LOCK_MS 150  /* same, while Center is held */
 #define MAX_LOCK_RESETS 15
 #define CLEAR_MS 300      /* full rows blink this long before they are removed */
 #define RETRY_DELAY_MS 700
@@ -97,7 +96,6 @@ typedef struct {
 	uint32_t score, best;
 	uint16_t lines;
 	uint8_t level, lock_resets, state;
-	bool soft;          /* Center is held */
 	bool press_handled; /* PRESSED was delivered for the current Center press */
 	bool dirty;
 } game_t;
@@ -276,7 +274,6 @@ static void game_over(game_t *g)
 {
 	g->state = OVER;
 	g->state_ms = 0;
-	g->soft = false;
 	if (g->score > g->best)
 		g->best = g->score;
 	char buf[64];
@@ -300,7 +297,6 @@ static void spawn(game_t *g)
 	g->fall_acc = 0;
 	g->lock_ms = 0;
 	g->lock_resets = 0;
-	g->soft = false; /* a held Center does not carry over to the next piece */
 	g->state = PLAYING;
 	g->dirty = true;
 	render_next(g);
@@ -428,15 +424,21 @@ static void rotate(game_t *g)
 	}
 }
 
-/* Used only if the firmware never delivers PRESSED for Center. */
-static void hard_drop(game_t *g)
+/* Center: one row down for a point, or lock the piece if it has landed. */
+static void step_down(game_t *g)
 {
-	while (fits(g, g->rot, g->px, g->py + 1)) {
-		g->py++;
-		g->score += 2;
+	if (g->state != PLAYING)
+		return;
+	if (grounded(g)) {
+		lock_piece(g);
+		return;
 	}
-	update_stats(g);
-	lock_piece(g);
+	g->py++;
+	g->fall_acc = 0;
+	g->lock_ms = 0;
+	g->score++;
+	set_num(g->score_val, g->score);
+	g->dirty = true;
 }
 
 static void update(game_t *g, uint32_t dt)
@@ -455,30 +457,21 @@ static void update(game_t *g, uint32_t dt)
 
 	const unsigned n_levels = sizeof(fall_ms) / sizeof(fall_ms[0]);
 	uint32_t interval = fall_ms[g->level <= n_levels ? g->level - 1u : n_levels - 1];
-	if (g->soft && interval > SOFT_MS)
-		interval = SOFT_MS;
 
 	if (!grounded(g)) {
 		g->fall_acc += dt;
-		bool soft_points = false;
 		while (g->fall_acc >= interval && !grounded(g)) {
 			g->fall_acc -= interval;
 			g->py++;
 			g->lock_ms = 0;
-			if (g->soft) {
-				g->score++;
-				soft_points = true;
-			}
 			g->dirty = true;
 		}
-		if (soft_points)
-			set_num(g->score_val, g->score);
 		if (grounded(g))
 			g->fall_acc = 0;
 		return;
 	}
 	g->lock_ms += dt;
-	if (g->lock_ms >= (g->soft ? SOFT_LOCK_MS : LOCK_MS))
+	if (g->lock_ms >= LOCK_MS)
 		lock_piece(g);
 }
 
@@ -508,7 +501,7 @@ static void center_down(game_t *g)
 			start(g);
 		break;
 	case PLAYING:
-		g->soft = true;
+		step_down(g);
 		break;
 	}
 }
@@ -522,16 +515,11 @@ static void input_cb(lv_event_t *e)
 		center_down(g);
 		return;
 	}
-	if (code == LV_EVENT_RELEASED) {
-		g->soft = false;
-		return;
-	}
 	if (code != LV_EVENT_KEY)
 		return;
 	uint32_t key = *(uint32_t *)lv_event_get_param(e);
 	switch (key) {
-	case FW_KEY_BACK:
-	case LV_KEY_ESC:
+	case FW_KEY_BACK_LONG: /* a short Back is ignored, so it can't end a game by accident */
 		fw_overlay_close(g->ov); /* frees g via on_delete */
 		return;
 	case FW_KEY_LEFT:
@@ -543,15 +531,15 @@ static void input_cb(lv_event_t *e)
 	case FW_KEY_UP:
 		rotate(g);
 		break;
-	case FW_KEY_CENTER: /* arrives on release */
-		g->soft = false;
-		if (g->press_handled) {
+	case FW_KEY_CENTER: /* arrives on release; only act if PRESSED was not delivered */
+		if (g->press_handled)
 			g->press_handled = false;
-		} else if (g->state == PLAYING) {
-			hard_drop(g);
-		} else {
+		else
 			center_down(g);
-		}
+		break;
+	case FW_KEY_CENTER_LONG:
+	case FW_KEY_CENTER_REPEAT:
+		step_down(g);
 		break;
 	}
 	if (g->dirty) {
@@ -640,10 +628,10 @@ static void build_scene(game_t *g, lv_obj_t *root)
 	panel_label(root, "LEVEL", COLOR_HEAD, px, by + 116, pw);
 	g->level_val = panel_label(root, "1", COLOR_TEXT, px, by + 130, pw);
 
-	g->msg = fw_rect(root, w - 8, 104, COLOR_PANEL);
+	g->msg = fw_rect(root, w - 8, 120, COLOR_PANEL);
 	lv_obj_set_style_border_width(g->msg, 1, 0);
 	lv_obj_set_style_border_color(g->msg, COLOR_TITLE, 0);
-	lv_obj_set_pos(g->msg, 4, (h - 104) / 2);
+	lv_obj_set_pos(g->msg, 4, (h - 120) / 2);
 	g->msg_title = fw_label(g->msg, "", COLOR_TITLE);
 	g->msg_text = fw_label(g->msg, "", COLOR_TEXT);
 	lv_obj_set_style_text_align(g->msg_text, LV_TEXT_ALIGN_CENTER, 0);
@@ -667,7 +655,7 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_t *root = g->ov->root;
 	build_scene(g, root);
 	g->state = READY;
-	show_message(g, "Mp3tris", "Left/Right: move\nUp: rotate\nHold Center: drop\n\nCenter: start");
+	show_message(g, "Mp3tris", "Left/Right: move\nUp: rotate\nCenter: drop\nHold Back: exit\n\nCenter: start");
 
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_PRESSED, g);
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_RELEASED, g);

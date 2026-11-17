@@ -1,3 +1,4 @@
 [
- {"bl_at": "0xd04c04", "target": "hook_home_menu_create", "expect": "0xd0fc64"}
+ {"bl_at": "0xd04c04", "target": "hook_home_menu_create", "expect": "0xd0fc64"},
+ {"bl_at": "0xcdd5e6", "target": "hook_key_event", "expect": "0xcf09d4"}
 ]

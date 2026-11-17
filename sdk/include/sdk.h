@@ -30,7 +30,14 @@ typedef struct {
 /* ---------------------------------------------------------------- full-screen overlays
  * A full-screen object on the top layer that takes all key input until it is deleted.
  * on_delete runs when the root object is deleted for any reason (fw_overlay_close or the firmware
- * tearing down the UI), which is the place to stop timers and free app state. */
+ * tearing down the UI), which is the place to stop timers and free app state.
+ * The root has both flags below set, so the app gets these long presses instead of the firmware;
+ * clear a flag on the root to restore the firmware's action.
+ *   FW_OBJ_FLAG_CENTER_LONG: holding Center sends FW_KEY_CENTER_LONG instead of powering off.
+ *   FW_OBJ_FLAG_BACK_LONG: holding Back sends FW_KEY_BACK_LONG instead of opening the volume
+ *   control. */
+#define FW_OBJ_FLAG_CENTER_LONG LV_OBJ_FLAG_USER_1
+#define FW_OBJ_FLAG_BACK_LONG LV_OBJ_FLAG_USER_2
 typedef struct {
 	lv_obj_t *root;
 	lv_group_t *group;

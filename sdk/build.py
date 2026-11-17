@@ -47,16 +47,18 @@ def compile_obj(zig, src, incs, obj):
         run([f"{GCC_BIN}/arm-none-eabi-gcc", *GCC_FLAGS, *incs, "-c", src, "-o", obj])
 
 
-def link(zig, objs, ld, out, entry):
+def link(zig, objs, ld, out, roots):
+    """Links objs; roots are the patch targets, kept by --gc-sections (the first is the entry)."""
     elf = os.path.join(out, "app.elf")
     binf = os.path.join(out, "app.bin")
+    keep = [f"-Wl,-e,{roots[0]}"] + [f"-Wl,--undefined={r}" for r in roots[1:]]
     if zig:
-        run([*ZIG, "cc", *ZIG_FLAGS, *objs, "-nostdlib", "-static", "-Wl,--gc-sections", f"-Wl,-e,{entry}",
+        run([*ZIG, "cc", *ZIG_FLAGS, *objs, "-nostdlib", "-static", "-Wl,--gc-sections", *keep,
              "-Wl,--no-dynamic-linker", "-Wl,-z,norelro", "-T", ld, "-o", elf])
         run([*ZIG, "objcopy", "-O", "binary", "--only-section=.text", elf, binf])
         return elf
     gcc = f"{GCC_BIN}/arm-none-eabi-"
-    run([gcc + "gcc", *GCC_FLAGS, *objs, "-nostdlib", "-T", ld, f"-Wl,-e,{entry}", "-Wl,--gc-sections",
+    run([gcc + "gcc", *GCC_FLAGS, *objs, "-nostdlib", "-T", ld, *keep, "-Wl,--gc-sections",
          f"-Wl,-Map={os.path.join(out, 'app.map')}", "-lgcc", "-o", elf])
     run([gcc + "objcopy", "-O", "binary", "--only-section=.text", elf, binf])
     with open(os.path.join(out, "app.lst"), "w") as f:
@@ -131,7 +133,7 @@ def main():
             compile_obj(a.zig, os.path.join(SDK, "src", f), sdk_inc, obj)
             objs.append(obj)
 
-    elf = link(a.zig, objs, os.path.join(SDK, "app.ld"), out, patches[0]["target"])
+    elf = link(a.zig, objs, os.path.join(SDK, "app.ld"), out, [p["target"] for p in patches])
     binf = os.path.join(out, "app.bin")
     syms = elf_symbols(elf)
     resolved = []
