@@ -68,7 +68,8 @@ To restore the stock firmware, flash `firmware_2M.bin` (or the backup) the same 
 | `tools/slfw.py` | Flash image parser: layout, partitions, checksums |
 | `tools/assets.py` | Asset unpack/pack/preview, and app injection (`pack --app`) |
 | `tools/img2c.py` | PNG to `lv_img_dsc_t` C header (used by the SDK build) |
-| `tools/xref.py` | Finds BL/B.W instructions that call given addresses |
+| `tools/xref.py` | Finds BL/B.W calls to given addresses, or (`--data`) code that loads a given pointer such as a string |
+| `tools/avicheck.py` | Checks whether an `.avi` file meets the firmware video player's requirements |
 | `tools/find_lv_images.py`, `find_lv_fonts.py`, `render.py`, `findbase.py`, `survey.py` | Analysis helpers used while mapping the firmware (each takes the dump as first argument) |
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
@@ -218,7 +219,10 @@ Rules and tips:
 2. Look up names in `ghidra/out/sl6801_app.bin_functions.csv`. Functions are named from their
    `__func__` strings, which covers most of LVGL's core and the vendor UI pages.
 3. Decompile without the GUI: `ghidra/decompile.sh app out.c <name|0xaddr>...`.
-4. Find callers: `.venv/Scripts/python tools/xref.py firmware_2M.bin 0xADDR...`.
+4. Find callers: `.venv/Scripts/python tools/xref.py firmware_2M.bin 0xADDR...`. To find the
+   code that uses a string, search the dump for the string's offset and look up its address
+   (`0xC00000 + offset`) with `tools/xref.py --data firmware_2M.bin 0xADDR`. Decompiling the
+   reported instruction address shows the function.
 5. Add the function to `fw.h` as `#define name FW_FN(0xADDR, ret, (args))`. Compare against the
    LVGL v8.3 source to confirm the signature, then check the literal in `sdk/build/app.lst`
    after building.
@@ -391,6 +395,42 @@ the first pixel in the high nibble; alpha must be 0xFF).
 0xD3F1FC, `lv_img_create` 0xD3E764, `lv_img_set_src` 0xD3E77C, `lv_timer_create` 0xD39F34,
 `lv_timer_del` 0xD39FA4, `lv_tick_get` 0xD37980, `lv_obj_add_event_cb` 0xD280C8, and the style
 setters from 0xD2E074.
+
+### Video player
+
+The home screen's "Video" item plays only one specific format, so most video files are ignored
+or rejected. The rules below come from the decompiled scanner (0xD53AD8) and parser
+(0xCF2DBC, 0xCF3500), and `tools/avicheck.py` applies the same checks to a file.
+
+**Finding files.**
+- The media database scan (`0:\DBROOT\db_video.db`) lists files by extension only, and the only
+  video extension is `.avi` (case-insensitive).
+- It searches the whole card up to 9 folders deep and lists at most 5000 files.
+- It skips `0:\record`, `0:\DBROOT`, `0:\dict` and `System Volume Information`.
+
+**Playing them.** A listed file plays only if:
+- It is a RIFF AVI with `hdrl`/`avih` first, followed directly by the stream lists. The video
+  stream is `vids` with codec `MJPG` (each frame a baseline JPEG, decoded with libjpeg).
+- The video is **exactly 128x160** (the screen in portrait); any other size fails with "width and
+  height failed".
+- Any audio track is **stereo** and is played as 16-bit PCM.
+- `movi` starts in the first 30 KB, and every chunk in it is a video or audio chunk of at most
+  30 KB, ending at `idx1`.
+- The frame rate comes from `avih`.
+
+ffmpeg's AVI output meets these rules. To convert a video for portrait viewing, letterboxed:
+
+```sh
+ffmpeg -i in.mp4 -vf "scale=128:160:force_original_aspect_ratio=decrease,pad=128:160:(ow-iw)/2:(oh-ih)/2,fps=20" \
+  -c:v mjpeg -q:v 5 -pix_fmt yuvj420p -c:a pcm_s16le -ar 44100 -ac 2 out.avi
+```
+
+To watch with the player turned sideways, scale to 160x128 and rotate:
+`-vf "scale=160:128:force_original_aspect_ratio=decrease,pad=160:128:(ow-iw)/2:(oh-ih)/2,transpose=1,fps=20"`
+(use `transpose=2` to rotate the other way).
+
+Not yet confirmed on the device: what frame rate the decoder keeps up with, and when the
+database is rescanned after files are copied to the card.
 
 ### Buttons and key events
 
