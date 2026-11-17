@@ -475,16 +475,23 @@ or rejected. The rules below come from the decompiled scanner (0xD53AD8) and par
   30 KB, ending at `idx1`.
 - The frame rate comes from `avih`.
 
+**The player mirrors the picture horizontally.** A file that looks right on a PC shows up
+left-right flipped on the device; this was seen on the player itself, and the cause in the
+firmware hasn't been found. To compensate, mirror the video during conversion with `hflip`
+(the commands below include it). Remove `hflip` if your player shows the video the right way
+round without it.
+
 ffmpeg's AVI output meets these rules. To convert a video for portrait viewing, letterboxed:
 
 ```sh
-ffmpeg -i in.mp4 -vf "scale=128:160:force_original_aspect_ratio=decrease,pad=128:160:(ow-iw)/2:(oh-ih)/2,fps=20" \
+ffmpeg -i in.mp4 -vf "scale=128:160:force_original_aspect_ratio=decrease,pad=128:160:(ow-iw)/2:(oh-ih)/2,hflip,fps=20" \
   -c:v mjpeg -q:v 5 -pix_fmt yuvj420p -c:a pcm_s16le -ar 44100 -ac 2 out.avi
 ```
 
-To watch with the player turned sideways, scale to 160x128 and rotate:
-`-vf "scale=160:128:force_original_aspect_ratio=decrease,pad=160:128:(ow-iw)/2:(oh-ih)/2,transpose=1,fps=20"`
-(use `transpose=2` to rotate the other way).
+To watch with the player turned sideways, scale to 160x128, rotate, then mirror:
+`-vf "scale=160:128:force_original_aspect_ratio=decrease,pad=160:128:(ow-iw)/2:(oh-ih)/2,transpose=1,hflip,fps=20"`
+(use `transpose=2` to rotate the other way). `hflip` must come after `transpose`, because the
+device mirrors the picture as it appears on the screen.
 
 Not yet confirmed on the device: what frame rate the decoder keeps up with, and when the
 database is rescanned after files are copied to the card.
