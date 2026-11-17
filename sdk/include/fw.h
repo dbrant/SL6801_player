@@ -79,6 +79,7 @@ typedef void (*lv_event_cb_t)(lv_event_t *e);
 
 #define LV_ALIGN_TOP_MID 2
 #define LV_ALIGN_CENTER 9
+#define LV_ALIGN_BOTTOM_LEFT 4
 #define LV_ALIGN_BOTTOM_MID 5
 
 #define LV_LABEL_LONG_WRAP 0
@@ -170,6 +171,55 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
 {
 	g->flags = (uint8_t)((g->flags & ~1u) | (en ? 1u : 0u));
 }
+
+/* ---------------------------------------------------------------- devices and audio
+ * OAL device layer. Devices are nodes in a circular list headed at FW_DEV_LIST: the link to the
+ * next node is at node+0x14, the name pointer at node+0, the driver's private data at node+4, and
+ * bit 0 of the byte at node+0x10 is set while the device is open. fw_dev_open returns the node;
+ * if the device is already open it returns the same node without opening it again. */
+#define FW_DEV_LIST ((void *)0x0081D40C)
+#define fw_dev_open FW_FN(0x00D44604, void *, (const char *name, int flags, const void *params))
+#define fw_dev_close FW_FN(0x00D44674, int, (void **node)) /* also clears *node */
+#define fw_dev_write FW_FN(0x00D446BE, int, (void *node, const void *buf, uint32_t count, int flags))
+
+/* "/dev/audio0" open parameters (10 words): channels, bytes per sample, sample rate (above 16000;
+ * lower rates fail), period in frames (every write must be exactly one period), number of
+ * periods in the ring buffer, frames buffered before output starts (0: the whole ring), 0, 0,
+ * event callback (may be NULL), callback argument. A write blocks while the ring is full.
+ * The callback gets (arg, 1) after open and (arg, 2) on close; FW_AUDIO_PA_CB is the video
+ * player's, which switches the speaker amplifier on (if the Speaker setting is on) and off. */
+#define FW_AUDIO_PA_CB 0x00CF34C5u
+
+/* Playback DMA state of the audio hardware, read by its interrupt (0x8167E8). In state PLAYING the
+ * interrupt starts the next period from the ring, even after the device has been closed and the
+ * ring freed, so close /dev/audio0 only once the ring has run dry (state STARVED). */
+#define FW_AUDIO_HW (*(const uint8_t *volatile *)(uintptr_t)0x0081E320u)
+#define FW_AUDIO_HW_STATE 0x21
+enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
+
+/* ---------------------------------------------------------------- OS layer (FreeRTOS wrappers)
+ * Pitfall: fw_os_calloc and fw_task_create return printf's return value (a small number), not
+ * NULL, on failure; check results with fw_is_ram(). */
+#define fw_is_ram(p) ((uintptr_t)(p) >= 0x00800000u && (uintptr_t)(p) < 0x00900000u)
+#define fw_os_calloc FW_FN(0x00CD8610, void *, (uint32_t n, uint32_t size))
+#define fw_os_free FW_FN(0x00CD8654, void, (void *p))
+#define fw_os_heap_free FW_FN(0x00CD8660, uint32_t, (void))
+#define fw_os_sleep FW_FN(0x00CD86B4, void, (uint32_t ms))
+/* entry(arg) runs in a new task; fw_task_join waits for entry to return, then deletes the task. */
+#define fw_task_create \
+	FW_FN(0x00CD88A4, void *, (void (*entry)(void *), void *arg, const char *name, int priority, uint32_t stack))
+#define fw_task_join FW_FN(0x00CD8960, void, (void *task))
+#define fw_sem_create FW_FN(0x00CD86DE, void *, (void)) /* binary semaphore, initially empty */
+#define fw_sem_take FW_FN(0x00CD874C, int, (void **sem, int timeout_ms)) /* -1 on timeout; -1 ms waits forever */
+#define fw_sem_give FW_FN(0x00CD876E, void, (void **sem))
+#define fw_sem_delete FW_FN(0x00CD86E8, int, (void **sem))
+
+/* Volume as set by the user (low byte), and the software gain stage the video player applies to
+ * 16-bit samples before writing them. */
+#define fw_audio_volume FW_FN(0x00CDF884, uint32_t, (void))
+#define fw_gain_create FW_FN(0x00D47BDC, void *, (int type, uint32_t rate, int channels, int bytes))
+#define fw_gain_apply FW_FN(0x00D47C10, void, (void *gain, uint32_t volume, void *buf, uint32_t frames))
+#define fw_gain_free FW_FN(0x00D47CB8, void, (void *gain))
 
 /* ---------------------------------------------------------------- vendor firmware */
 

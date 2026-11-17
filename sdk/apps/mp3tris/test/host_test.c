@@ -74,6 +74,10 @@ fw_overlay_t *fw_overlay_open(lv_obj_t *rf, lv_color_t bg, void (*on_delete)(voi
 void fw_overlay_close(fw_overlay_t *o) { closed = 1; o->on_delete(o->ctx); }
 lv_obj_t *fw_label(lv_obj_t *p, const char *t, lv_color_t c) { (void)p; (void)c; lv_obj_t *o = new_obj(); lv_label_set_text(o, t); return o; }
 lv_obj_t *fw_rect(lv_obj_t *p, lv_coord_t w, lv_coord_t h, lv_color_t c) { (void)p; (void)w; (void)h; (void)c; return new_obj(); }
+static int sounds_played;
+fw_sound_t *fw_sound_open(void) { return NULL; }
+void fw_sound_play(fw_sound_t *s, const fw_tone_t *t, uint8_t n) { (void)s; (void)t; (void)n; sounds_played++; }
+void fw_sound_close(fw_sound_t *s) { (void)s; }
 char *fw_put_str(char *p, const char *s) { while (*s) *p++ = *s++; *p = 0; return p; }
 char *fw_put_dec(char *p, uint32_t v) { return p + sprintf(p, "%u", (unsigned)v); }
 

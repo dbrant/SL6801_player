@@ -9,6 +9,7 @@
 #include "bird_down.h"
 #include "bird_up.h"
 #include "sdk.h"
+#include "sfx.h"
 
 #define FP 16
 #define STEP_MS 33
@@ -58,6 +59,7 @@ typedef struct {
 typedef struct {
 	fw_overlay_t *ov;
 	lv_timer_t *timer;
+	fw_sound_t *snd;
 	lv_obj_t *bird, *score_label, *title, *hint;
 	const lv_img_dsc_t *bird_src;
 	pillar_t pillar[PIPES];
@@ -163,6 +165,7 @@ static void flap(game_t *g)
 	g->v = FLAP_V;
 	g->flap_frame = g->frame;
 	set_bird_src(g, &img_bird_up);
+	fw_sound_play(g->snd, FW_SFX(sfx_flap));
 }
 
 static void on_center(game_t *g)
@@ -171,6 +174,7 @@ static void on_center(game_t *g)
 	case READY:
 		hide_message(g);
 		g->state = PLAYING;
+		fw_sound_play(g->snd, FW_SFX(sfx_start));
 		flap(g);
 		break;
 	case PLAYING:
@@ -196,6 +200,8 @@ static void die(game_t *g)
 	if (g->score > g->best)
 		g->best = g->score;
 	set_bird_src(g, &img_bird_dazed);
+	fw_sound_play(g->snd, FW_SFX(sfx_crash_noise));
+	fw_sound_play(g->snd, FW_SFX(sfx_crash_bonk));
 	char buf[48];
 	char *p = fw_put_str(buf, "Score ");
 	p = fw_put_dec(p, g->score);
@@ -250,6 +256,7 @@ static void step(game_t *g)
 		if (!p->scored && px + PIPE_W < BIRD_X) {
 			p->scored = true;
 			g->score++;
+			fw_sound_play(g->snd, FW_SFX(sfx_score));
 			set_score_text(g);
 		}
 		lv_coord_t hx = BIRD_X + HIT_INSET, hy = by + HIT_INSET;
@@ -324,6 +331,7 @@ static void on_delete(void *ctx)
 	game_t *g = ctx;
 	if (g->timer)
 		lv_timer_del(g->timer);
+	fw_sound_close(g->snd);
 	lv_mem_free(g);
 }
 
@@ -392,6 +400,7 @@ static void open(lv_obj_t *return_focus)
 
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_PRESSED, g);
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_KEY, g);
+	g->snd = fw_sound_open();
 	g->last_tick = lv_tick_get();
 	g->timer = lv_timer_create(tick_cb, STEP_MS / 2, g);
 }

@@ -6,6 +6,7 @@
  * one object per cell would not fit in the 40 KB LVGL heap.
  */
 #include "sdk.h"
+#include "sfx.h"
 
 #define COLS 10
 #define ROWS 20
@@ -77,6 +78,7 @@ typedef struct {
 typedef struct {
 	fw_overlay_t *ov;
 	lv_timer_t *timer;
+	fw_sound_t *snd;
 	lv_obj_t *board_img, *next_img;
 	lv_obj_t *score_val, *lines_val, *level_val;
 	lv_obj_t *msg, *msg_title, *msg_text;
@@ -284,6 +286,7 @@ static void game_over(game_t *g)
 	p = fw_put_dec(p, g->best);
 	fw_put_str(p, "\n\nCenter: again");
 	show_message(g, "Game over", buf);
+	fw_sound_play(g->snd, FW_SFX(sfx_over));
 	g->dirty = true;
 }
 
@@ -317,6 +320,7 @@ static void start(game_t *g)
 	g->next = bag_next(g);
 	update_stats(g);
 	lv_obj_add_flag(g->msg, LV_OBJ_FLAG_HIDDEN);
+	fw_sound_play(g->snd, FW_SFX(sfx_start));
 	spawn(g);
 }
 
@@ -349,12 +353,20 @@ static void lock_piece(game_t *g)
 		}
 	}
 	if (!n) {
+		fw_sound_play(g->snd, FW_SFX(sfx_land));
 		spawn(g);
 		return;
 	}
 	g->lines += (uint16_t)n;
 	g->score += line_points[n] * g->level;
-	g->level = (uint8_t)(1 + g->lines / 10);
+	uint8_t level = (uint8_t)(1 + g->lines / 10);
+	if (n == 4)
+		fw_sound_play(g->snd, FW_SFX(sfx_clear4));
+	else
+		fw_sound_play(g->snd, FW_SFX(sfx_clear));
+	if (level != g->level)
+		fw_sound_play(g->snd, FW_SFX(sfx_level));
+	g->level = level;
 	update_stats(g);
 	g->state = CLEARING;
 	g->state_ms = 0;
@@ -394,6 +406,7 @@ static void shift(game_t *g, int dx)
 	if (g->state == PLAYING && fits(g, g->rot, g->px + dx, g->py)) {
 		g->px = (int8_t)(g->px + dx);
 		moved(g);
+		fw_sound_play(g->snd, FW_SFX(sfx_move));
 	}
 }
 
@@ -409,6 +422,7 @@ static void rotate(game_t *g)
 			g->px = (int8_t)x;
 			g->py = (int8_t)y;
 			moved(g);
+			fw_sound_play(g->snd, FW_SFX(sfx_rotate));
 			return;
 		}
 	}
@@ -553,6 +567,7 @@ static void on_delete(void *ctx)
 	game_t *g = ctx;
 	if (g->timer)
 		lv_timer_del(g->timer);
+	fw_sound_close(g->snd);
 	lv_mem_free(g);
 }
 
@@ -657,6 +672,7 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_PRESSED, g);
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_RELEASED, g);
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_KEY, g);
+	g->snd = fw_sound_open();
 	g->last_tick = lv_tick_get();
 	g->timer = lv_timer_create(tick_cb, TICK_MS, g);
 }

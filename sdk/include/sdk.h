@@ -43,6 +43,31 @@ fw_overlay_t *fw_overlay_open(lv_obj_t *return_focus, lv_color_t bg, void (*on_d
 /* Deletes the overlay (running on_delete) and gives focus back. Do not touch app state afterwards. */
 void fw_overlay_close(fw_overlay_t *ov);
 
+/* ---------------------------------------------------------------- sound effects
+ * A 44.1 kHz stream on /dev/audio0 that plays synthesized tones, fed by its own task the way the
+ * video player feeds its audio. fw_sound_open returns NULL when the device is in use (e.g. by the
+ * music player) or cannot be opened; the other functions accept NULL and then do nothing.
+ * A sound starts within about 50 ms of fw_sound_play. */
+enum { FW_WAVE_SQUARE, FW_WAVE_TRIANGLE, FW_WAVE_NOISE };
+
+/* One tone: frequency slides linearly from f0 to f1 Hz (noise: the rate it changes at), volume
+ * 0-255 decays to 0 over the tone's length. vol 0 gives a rest. */
+typedef struct {
+	uint16_t f0, f1;
+	uint16_t ms;
+	uint8_t wave, vol;
+} fw_tone_t;
+
+typedef struct fw_sound fw_sound_t;
+
+fw_sound_t *fw_sound_open(void);
+/* Plays tones[0..count-1] one after another; up to 4 sounds play at once. The tones must stay
+ * valid while they play (static const tables). */
+void fw_sound_play(fw_sound_t *s, const fw_tone_t *tones, uint8_t count);
+/* Stops the sound task and closes the device. */
+void fw_sound_close(fw_sound_t *s);
+#define FW_SFX(tones) (tones), (uint8_t)(sizeof(tones) / sizeof((tones)[0]))
+
 /* ---------------------------------------------------------------- small helpers */
 char *fw_put_str(char *p, const char *s);
 char *fw_put_dec(char *p, uint32_t v);

@@ -75,6 +75,7 @@ To restore the stock firmware, flash `firmware_2M.bin` (or the backup) the same 
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
 | `sdk/apps/keytest`, `flutter`, `mp3tris` | Apps |
+| `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `patches/` | Fix for the upstream `smtlink_dump` (see [Gotchas](#gotchas)) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -208,6 +209,14 @@ Rules and tips:
 - **Sprites**: put PNGs in `assets/`; `#include "X.h"` and use `&img_X` with `lv_img_set_src`.
   Use hard alpha (the firmware draws chroma-keyed images, not alpha blending). Flutter's `art.py`
   shows how to draw sprites with Pillow.
+- **Sound effects**: see [Audio](#audio). The usual pattern:
+  - `fw_sound_open()` when the app opens;
+  - `fw_sound_play(snd, FW_SFX(table))` for each effect;
+  - `fw_sound_close()` in `on_delete`.
+
+  Effects are tables of `fw_tone_t`. Both games keep theirs in `sfx.h`. To listen to them on the
+  PC, build `sdk/test/sfx_preview.c` (instructions at its top), which writes all of an app's
+  effects to a WAV file.
 - **Host testing**: game logic can be compiled and run on the PC with MSYS2 gcc. `#undef` the
   `fw.h` macros the app uses, define stubs, then `#include "main.c"`.
   `sdk/apps/mp3tris/test/host_test.c` drives the game with fake events and ticks, and `show.py`
@@ -495,6 +504,91 @@ device mirrors the picture as it appears on the screen.
 
 Not yet confirmed on the device: what frame rate the decoder keeps up with, and when the
 database is rescanned after files are copied to the card.
+
+### Audio
+
+**Device layer.** Drivers are nodes in a list at 0x81D40C. The calls are `fw_dev_open(name,
+flags, params)` (0xD44604), `fw_dev_close(&node)` (0xD44674) and `fw_dev_write(node, buf, count,
+0)` (0xD446BE).
+- Opening a device that is already open returns the same node without reopening it. Closing that
+  node would close the other user's stream, so `sdk/src/sound.c` checks the node's "open" flag
+  first and stays silent if the device is busy.
+
+**`/dev/audio0`** (driver functions: open 0xD46434, write 0xD4628C, close 0xD462BC) takes 10
+words of open parameters:
+- channels, bytes per sample, sample rate, period (frames), periods in the ring buffer,
+  start threshold (frames), 0, 0, event callback, callback argument;
+- rates of 16 kHz or less fail, and mono is converted to stereo;
+- every write must be exactly one period;
+- a start threshold of 0 means the whole ring must fill before output starts.
+
+The ring is written by `FUN_00813982`, which waits (for up to 3 s) only when the ring is full.
+The video player (`FUN_00CF3500`) and the music player's sink (`FUN_00D4968C`) both use this
+device.
+
+The event callback gets (arg, 1) after open and (arg, 2) on close. The video player's callback
+(0xCF34C5) switches the speaker amplifier ("PA") on through a boot-ROM routine when the Speaker
+setting is on, and off again on close.
+
+**How the firmware's players use it.** Both feed the device from a dedicated task, keep the ring
+full with blocking writes, and close only after stopping that task. The video player
+(`FUN_00CF3500`, close `FUN_00CF3744`) opens a stream of 256-frame periods × 16 with its PA
+callback and runs `FUN_00CF3324` in a task. The music player's sink is `FUN_00D4968C`.
+
+**Closing safely.** The playback DMA interrupt (0x8167E8) keeps a state byte at +0x21 of the
+hardware object that `*(void **)0x81E320` points to: 0 idle, 1 priming (it loops 16 bytes of
+silence), 2 playing, 3 starved. While playing, each interrupt consumes the finished period and
+starts the next one from the ring, and switches to "starved" when less than a period is left.
+Closing the device stops the stream (which starts one more period from the ring), releases the
+DMA channel and frees the ring, but does not stop the interrupt. If the ring still holds data,
+the next interrupt starts a transfer from the freed ring with the cleared channel handle. When the
+SDK closed with a full ring, opening the audio device after the resulting reboot rebooted the
+player again until a power cycle; waiting for the ring to run dry first stopped that. So close
+only once the ring has run dry (state 3). The video player gets this for free, because
+it frees its buffers and closes the file between stopping its task and closing the device.
+
+**Don't touch `/dev/audio0` from the UI task.** The UI runs in `watch_view_task` (0xCD8FE0),
+which calls `lv_timer_handler` (0xD39FC8) in a loop; app timers and key events run inside it.
+Measured with the Sound test app (`sdk/apps/soundtest`, which runs each step from a UI timer and
+logs it on screen first):
+- a write from the UI task that has to wait for ring space hangs for about 10 s and then reboots,
+  every time;
+- opening or closing from the UI task sometimes crashes, even with nothing played;
+- joining the sound task, or sleeping while the ring drains, from the UI task hung on exit.
+
+The same writes from a separate task always worked. The cause isn't known. The music player
+opens, writes and closes from its own task. The video player opens and closes from presenter
+code, outside LVGL timers and events. Do all device calls from your own task, and finish from a
+UI timer once that task is done.
+
+**Volume.** `fw_audio_volume()` (0xCDF884) returns the user's volume in the low byte. The video
+player scales samples with `fw_gain_apply(gain, volume, buf, frames)` (0xD47C10) on a gain object
+from `fw_gain_create(0, rate, 2, 2)`.
+
+**OS layer.** The firmware wraps FreeRTOS (all in `fw.h`):
+- tasks: `fw_task_create(entry, arg, name, priority, stack)` (0xCD88A4) and `fw_task_join`
+  (0xCD8960), which waits for `entry` to return;
+- binary semaphores: create, take (-1 on timeout), give, delete (0xCD86DE, 0xCD874C, 0xCD876E,
+  0xCD86E8);
+- firmware heap: `fw_os_calloc` and `fw_os_free` (0xCD8610, 0xCD8654);
+- `fw_os_sleep(ms)` (0xCD86B4).
+
+On failure, the allocation and task functions return `printf`'s return value instead of NULL.
+`fw_is_ram()` checks results.
+
+**SDK sound module** (`sdk/src/sound.c`) follows the video player:
+- its state is on the firmware heap;
+- a task at priority 6 owns the device. It opens it at 44.1 kHz stereo, 8 periods of 256 frames,
+  with the video player's PA callback, then renders one period at a time with blocking writes;
+- `fw_sound_play` hands requests to the task through a small lock-free queue;
+- `fw_sound_close` only signals a semaphore and returns. The task fills the ring with silence,
+  waits for it to run dry (`FW_AUDIO_HW` state, polled with `fw_os_sleep`), closes the device,
+  sets a flag and returns. A 20 ms LVGL timer then joins the task, which no longer blocks, and
+  frees the state, about 0.1 s after the game has closed.
+
+It mixes up to 4 synthesized voices: square, triangle or noise, with a linear frequency slide and
+a decaying envelope. The games have no sound while the music player has the audio device open.
+Whether the music player keeps the device open while paused or stopped hasn't been tested yet.
 
 ### Buttons and key events
 

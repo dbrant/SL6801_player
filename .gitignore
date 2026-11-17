@@ -11,8 +11,9 @@ sdk/apps/*/build/
 /*.bin
 !/firmware_2M.bin
 
-# Test videos
+# Test videos and sound previews
 /*.avi
+/*.wav
 
 # Ghidra: project database, input copies and generated listings (rebuild with ghidra/import.sh)
 ghidra/project/
