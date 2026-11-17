@@ -1,0 +1,464 @@
+# SL6801 MP3 player: firmware reverse engineering and custom apps
+
+Tools and notes for modifying the firmware of a cheap AliExpress MP3 player with a 1.8" color
+screen, built around a chip labeled "Jointbees MP3 R14181B6A0" (really a Smartlink **SL6801**).
+The vendor firmware is version `yp3_2.0.43`.
+
+What works so far, all tested on the device:
+
+- **Assets**: unpack and repack images, UI strings (10 languages), fonts and the alarm tone, with
+  all checksums fixed. Edited data goes to free flash.
+- **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
+  LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
+- **Apps**: *Key test* (shows key codes), *Flutter* (a side-scrolling flapping game) and
+  *Mp3tris* (a falling-block puzzle).
+- **Flashing from Windows** over USB with a patched build of `smtlink_dump`.
+- **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
+  scripts.
+
+`firmware_2M.bin` is the original 2 MB flash dump of this unit. Keep it unmodified: every image is
+built from it.
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Repository layout](#repository-layout)
+- [Workflows](#workflows): [assets](#editing-assets), [apps](#building-apps),
+  [flashing](#flashing), [writing an app](#writing-a-new-app),
+  [finding firmware functions](#finding-firmware-functions)
+- [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
+  [flash layout](#flash-layout), [software stack](#software-stack), [assets](#assets-inside-firm),
+  [SDK internals](#sdk-internals), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
+  [Windows flashing setup](#windows-flashing-setup)
+- [Gotchas](#gotchas) and [open questions](#open-questions)
+
+## Quick start
+
+The environment is Windows with Git Bash; paths below are the ones used here.
+
+| Need | Used here |
+|---|---|
+| Python 3 venv in `.venv` with Pillow (`ziglang` optional) | `python -m venv .venv` then `.venv/Scripts/python -m pip install -r requirements.txt` |
+| Arm GCC | xPack arm-none-eabi-gcc 15.2.1 in `C:/Tools/arm-gnu-toolchain` (or set `ARM_GCC_BIN` to its `bin`) |
+| Flasher | `smartlink_flash/smtlink_dump.exe`, built in MSYS2 (see [Windows flashing setup](#windows-flashing-setup)) |
+| USB driver | WinUSB for `301A:2800`, installed with Zadig |
+| Ghidra (optional) | `C:/Tools/ghidra` (or `GHIDRA_HOME`), JDK via `JAVA_HOME` |
+
+Build the games, pack them with the edited assets in `work/`, and flash:
+
+```sh
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris
+.venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
+# put the player in bootloader mode, then:
+smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
+```
+
+The new rows appear under **APP** on the home screen, below Alarm and Pictures.
+
+Before the first write to a new unit, back up its flash:
+`smartlink_flash/smtlink_dump.exe init flash_id read_flash 0 2M backup.bin`.
+To restore the stock firmware, flash `firmware_2M.bin` (or the backup) the same way.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `firmware_2M.bin` | Original flash dump (tracked; never modified) |
+| `work/` | Unpacked assets (`assets.py unpack`), including a custom 96x96 welcome banner |
+| `tools/slfw.py` | Flash image parser: layout, partitions, checksums |
+| `tools/assets.py` | Asset unpack/pack/preview, and app injection (`pack --app`) |
+| `tools/img2c.py` | PNG to `lv_img_dsc_t` C header (used by the SDK build) |
+| `tools/xref.py` | Finds BL/B.W instructions that call given addresses |
+| `tools/find_lv_images.py`, `find_lv_fonts.py`, `render.py`, `findbase.py`, `survey.py` | Analysis helpers used while mapping the firmware (each takes the dump as first argument) |
+| `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
+| `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
+| `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
+| `sdk/apps/hello`, `flutter`, `mp3tris` | Apps |
+| `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
+| `patches/` | Fix for the upstream `smtlink_dump` (see [Gotchas](#gotchas)) |
+| `smartlink_flash/` | Local clone and build of the flasher (not in git) |
+
+## Workflows
+
+All Python tools run with the project venv, e.g. `.venv/Scripts/python -I tools/assets.py ...`.
+
+### Editing assets
+
+```sh
+.venv/Scripts/python -I tools/assets.py unpack firmware_2M.bin work   # only needed once
+# edit files in work/
+.venv/Scripts/python -I tools/assets.py pack firmware_2M.bin work out.bin
+```
+
+`pack` applies everything that differs from the original, fixes all checksums, prints the changed
+flash ranges and the command to flash the result.
+
+- **Strings**: edit `work/strings.json` (10 languages x 219 strings). New text is stored in free
+  flash and the string table is repointed.
+- **Images**: edit the PNGs in `work/images/`, keeping the file name. A same-size image is
+  replaced in place. A new size is stored in free flash and the descriptor updated, but the UI
+  layout code may still assume the old size (the welcome banner `img_a5ff8_84x20.png` works fine
+  at 96x96). Pixels with alpha < 128 become transparent in chroma-keyed images.
+- **Fonts**: set `"rebuild"` in `work/fonts/<font>.json`, e.g.
+  `{"ttf": "C:/Windows/Fonts/arial.ttf", "size": 12, "mode": "add_missing", "add_chars": "ŹŻ"}`.
+  `add_missing` renders only codepoints the font lacks (for the UI font this includes, by default,
+  every character used in `strings.json`); `replace` re-renders every glyph the TTF has. Optional
+  keys: `y_shift`, `line_height`, `base_line`, `include_strings`. New glyph bitmaps are appended in
+  free flash; the original bitmaps stay where they are.
+- **Tone**: replace `work/tone/alarm1.mp3`.
+
+`assets.py preview <image.bin> font_464b0 out.png "text" ...` renders text with a firmware font
+(using LVGL's glyph placement) to check font edits before flashing.
+
+`slfw.py <image> info` prints the layout and verifies all checksums; `slfw.py <image> extract <dir>`
+writes the partitions; `slfw.py <image> fixcrc <out>` recomputes the checksums.
+
+### Building apps
+
+```sh
+.venv/Scripts/python sdk/build.py [--zig] [-o OUT] <app dir>...
+```
+
+- Links one or more apps into one image. Their menu rows appear in the order the apps are given,
+  e.g. `sdk/build.py sdk/apps/hello sdk/apps/flutter sdk/apps/mp3tris` for all three.
+- Uses arm-none-eabi-gcc by default, or `zig cc` (from the `ziglang` pip package) with `--zig`.
+  Both produce working code (Thumb-2, Cortex-M4, soft-float ABI).
+- Each app directory's `*.c` files are compiled separately with the app's own include path. Each
+  `assets/X.png` becomes a header `X.h` defining an `lv_img_dsc_t` named `img_X`, visible to that
+  app only.
+- `sdk/src/*.c` is linked into every image.
+- Output in `sdk/build/` (default): `app.bin`, `app.json`, and with gcc `app.map` and `app.lst`
+  (disassembly interleaved with source, useful for checking firmware addresses).
+
+`app.json` holds the load address, flash offset and the BL patches. Pass it to
+`assets.py pack ... --app sdk/build/app.json`. The pack step:
+- checks that the target flash region is erased in the original dump;
+- checks that each patched BL still calls the expected original function;
+- writes the code and the patched BLs.
+
+### Flashing
+
+1. Put the player in bootloader mode: turn it off, then hold the boot key while connecting USB.
+   It enumerates as `301A:2800`.
+2. Run `smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin`.
+
+Always flash the whole image with `write_flash 0 0 0 <file>`. Only sectors that differ are
+rewritten, so this is fast. Don't use per-region `write_flash` commands with the upstream tool
+(see [Gotchas](#gotchas)).
+
+The USB bootloader is in the chip's boot ROM, so a bad flash can always be recovered by
+flashing a good image again. This has happened once and was recovered this way.
+
+### Writing a new app
+
+Create `sdk/apps/<name>/main.c`. A minimal full-screen app that closes on Back:
+
+```c
+#include "sdk.h"
+
+typedef struct {
+	fw_overlay_t *ov;
+} app_t;
+
+static void on_delete(void *ctx)
+{
+	lv_mem_free(ctx); /* runs however the overlay goes away; stop timers here too */
+}
+
+static void key_cb(lv_event_t *e)
+{
+	app_t *app = lv_event_get_user_data(e);
+	uint32_t key = *(uint32_t *)lv_event_get_param(e);
+	if (key == FW_KEY_BACK || key == LV_KEY_ESC)
+		fw_overlay_close(app->ov); /* frees app via on_delete */
+}
+
+static void open(lv_obj_t *return_focus)
+{
+	app_t *app = lv_mem_alloc(sizeof(app_t));
+	if (!app)
+		return;
+	app->ov = fw_overlay_open(return_focus, lv_rgb(0x10, 0x20, 0x60), on_delete, app);
+	if (!app->ov) {
+		lv_mem_free(app);
+		return;
+	}
+	lv_obj_align(fw_label(app->ov->root, "Hello", lv_rgb(0xFF, 0xFF, 0xFF)), LV_ALIGN_CENTER, 0, 0);
+	lv_obj_add_event_cb(app->ov->root, key_cb, LV_EVENT_KEY, app);
+}
+
+FW_MENU_ITEM(FW_SYMBOL_OK, "Hello", open);
+```
+
+Rules and tips:
+
+- **No writable globals.** Code runs from flash; the linker script rejects `.data` and `.bss`.
+  Keep all state in memory from `lv_mem_alloc` and free it in `on_delete`. `static const` tables
+  are fine.
+- **Memory is tight.** The LVGL heap is 40 KB for the whole UI. Prefer a few objects; for many
+  small elements draw into an indexed image instead (see Mp3tris).
+- **Animation**: use `lv_timer_create` and `lv_tick_get`; see Flutter for a fixed-step loop that
+  catches up when the timer fires late.
+- **Input**: see [Buttons and key events](#buttons-and-key-events). Center needs special handling
+  because its `LV_EVENT_KEY` only arrives on release.
+- **Menu icons**: `FW_FONT_ICONS` has only these FontAwesome codepoints: F001 F008 F00C F013 F01D
+  F028 F02D F02E F04A F04B F04C F04E F095 F09B F0C7 F0C9 F115 F130 F131 F1C5 F21D F260 F28C F294.
+  `sdk.h` defines `FW_SYMBOL_AUDIO`, `OK`, `PLAY` and `BARS`.
+- **Sprites**: put PNGs in `assets/`; `#include "X.h"` and use `&img_X` with `lv_img_set_src`.
+  Use hard alpha (the firmware draws chroma-keyed images, not alpha blending). Flutter's `art.py`
+  shows how to draw sprites with Pillow.
+- **Host testing**: game logic can be compiled and run on the PC with MSYS2 gcc. `#undef` the
+  `fw.h` macros the app uses, define stubs, then `#include "main.c"`.
+  `sdk/apps/mp3tris/test/host_test.c` drives the game with fake events and ticks, and `show.py`
+  renders its image dumps to PNG.
+
+### Finding firmware functions
+
+1. Build the Ghidra project once: `ghidra/import.sh`.
+2. Look up names in `ghidra/out/sl6801_app.bin_functions.csv`. Functions are named from their
+   `__func__` strings, which covers most of LVGL's core and the vendor UI pages.
+3. Decompile without the GUI: `ghidra/decompile.sh app out.c <name|0xaddr>...`.
+4. Find callers: `.venv/Scripts/python tools/xref.py firmware_2M.bin 0xADDR...`.
+5. Add the function to `fw.h` as `#define name FW_FN(0xADDR, ret, (args))`. Compare against the
+   LVGL v8.3 source to confirm the signature, then check the literal in `sdk/build/app.lst`
+   after building.
+
+Unnamed LVGL functions can usually be identified from a named caller. For example,
+`lv_img_set_src` calls `lv_obj_invalidate` first and last. Style setters can be identified by
+their v8.3 property IDs (e.g. `BG_COLOR` 0x20, `TEXT_COLOR` 0x457, `TEXT_FONT` 0x1459).
+
+## Reference
+
+### Hardware
+
+From photos of the board:
+
+| Part | Identification |
+|---|---|
+| SoC | "Jointbees MP3 R14181B6A0", QFN-48, really a Smartlink **SL6801** (string `SL6801` in the bootloader). 2 MB flash in the package, no external flash chip. |
+| CPU | ARM Cortex-M4 class with FPU (VFP instructions present). Log strings mention CPU0 and CPU1 (dual core). |
+| Display | 128x160 ST7789 TFT on a 20-pin FPC (`st7789s_lcd_init`), RGB565 |
+| FM radio | RDA5807M (marked `5807M`) |
+| Speaker amp | 8002D (SOP-8, class AB) |
+| Other | microSD slot (SDIO), mic (MIC1), PCB trace antenna (Bluetooth), 5 buttons, slide switch, USB-C, 3.5 mm jack, 150 mAh LiPo |
+| Test pads | `5V DM DP G ADC` (USB + ADC) next to R27-R30 |
+
+USB IDs: `301A:2800` in bootloader mode (boot ROM, serial `20201111000001`), `301A:2801` as a card
+reader in normal operation.
+
+### Memory map
+
+| Address | What |
+|---|---|
+| `0x00000000` | Boot ROM (ROM memcpy at `0xB2A`, printf to the debug UART at `0x2B0`) |
+| `0x00800000`-`~0x0087FFFF` | RAM. App initial SP `0x0086B710`, bootloader SP `0x0083BE90` |
+| `0x00804800` | App vector table (FIRM RAM block), reset at `0x00804C40` |
+| `0x0080CC40`-`0x0081AAEC` | App `.data`, copied from flash `0x39470`-`0x4731C` at startup (RAM = flash offset + `0x7D37D0`) |
+| `0x0081AAEC`-`0x0086B710` | App `.bss` (zeroed by Reset_Handler) |
+| `0x0081FBC0` | Bootloader vector table (loaded from flash `0x60`), reset at `0x00820000` |
+| `0x00876000` | LVGL heap (40 KB TLSF pool) |
+| `0x00C00000` | SPI flash, memory mapped (XIP). Flash offset `X` is at `0xC00000 + X` |
+| `0x40000000`-`0x400FFFFF` | Peripheral registers |
+| `0xE000E018` | SysTick current value (used as a random seed) |
+
+### Flash layout
+
+| Flash offset | Size | Content |
+|---|---|---|
+| `0x000000` | 0x60 | `HLKJ` header: +4 load address, +8 entry, +0xC code offset, +0x10 code size, +0x14 CRC16, +0x20 partition table offset |
+| `0x000060` | 0xC8EC | Bootloader (FreeRTOS-based; LCD/SD init, firmware update from PC/SD) |
+| `0x00D000` | 0x40 | Partition table: u32 count (3), ..., 16-byte entries from +0x10: name, offset, size, CRC16 |
+| `0x00E000` | 0x174270 | `FIRM` main application |
+| `0x183000` | 0x2038 | `TONE`: u32 size + name (`alarm1.mp3`), data at +0x400 (MP3 with ID3 tag) |
+| `0x185038` | ~475 KB | Free (0xFF). Used by these tools: asset data from `0x186000`, app code from `0x1D0000` |
+| `0x1FC000` | 0x4000 | `PSMP` settings (non-volatile storage, not checksummed) |
+
+The free area is not touched by the vendor firmware as far as is known, and data placed there
+reads back fine at run time.
+
+**FIRM header** (0x30 bytes):
+
+| Offset | Value | Meaning |
+|---|---|---|
+| +0x00 | 0x30 | header size |
+| +0x04 | | build timestamp |
+| +0x10 | 0x804C00 | unclear; disassembly shows the block's vectors at 0x804800 |
+| +0x14 | 0x804C01 | entry |
+| +0x18 | 0x1000 | size of the RAM block (starts at FIRM+0x30) |
+| +0x1C | | CRC16 of the RAM block |
+
+The rest of FIRM runs in place from flash. There is a 130 KB zero-filled run at flash
+`0x18A8E`-`0x39470`, right before the `.data` load image; its purpose is unknown, so the tools
+leave it alone.
+
+**Checksums**: CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over the bootloader, FIRM, TONE and
+the FIRM RAM block. There are no signatures. `slfw.py fixcrc` reproduces the original dump byte
+for byte.
+
+### Software stack
+
+From strings and decompilation:
+
+- FreeRTOS with an OAL layer and Linux-style device nodes: `/dev/lcd`, `/dev/audio0` (play),
+  `/dev/audio1` (record), `/dev/fm`, `/dev/tp`, `/dev/usbd`, `/dev/uart0..2`, `/dev/key_io`,
+  `/dev/key_onoff`, `/dev/kadc_ch1`, `/dev/timer`.
+- LVGL v8.3 (source path `F:\pen133_yp3_mp\spark2\src\gui8\lvgl\...`), configured with
+  `LV_COLOR_16_SWAP=1`, `LV_USE_USER_DATA=0`, 16-bit `lv_coord_t`, `LV_FONT_FMT_TXT_LARGE`, and
+  the image cache disabled. Asserts include function names, which helps naming functions.
+- FatFs (FAT32/exFAT), libjpeg, codecs: MP3, FLAC, APE, WMA, AAC, OGG/Vorbis, SBC/mSBC.
+- Bluetooth classic: A2DP source and sink, AVRCP, HFP.
+- Apps: music (database with artist/album/favorites, `.lrc` lyrics), video (MJPEG AVI), photo
+  viewer, ebook, English dictionary, voice recorder (WAV/ADPCM to `0:\record`), FM radio, alarm,
+  EQ.
+- UI pages are created by `view_page_create` (0xD04A1C), a switch on page id; page handlers are
+  `pageN_*_process` functions.
+
+The app also calls into the boot ROM (e.g. `bl 0x2b0`, `b.w 0x2564`). A ROM dump would help
+deeper work: `smtlink_dump init read_mem 0 0x10000 rom.bin` (size is a guess). Until then the
+Ghidra setup fills the ROM with `bx lr` stubs.
+
+### Assets inside FIRM
+
+**Images**: 15 LVGL `lv_img_dsc_t` (`{u32 header (cf:5, w:11, h:11), u32 data_size, u8 *data}`),
+each followed by its pixels, around flash `0x9D1E8`-`0xA6D24`: 9 menu icons 29x29, 4 app icons
+50x50 (3 of them 8-bit indexed), one 16x16, and the 84x20 "welcome" banner. True color is RGB565
+with bytes swapped. Chroma-keyed images use pure green `0x07E0` as transparent. Most other UI
+graphics are glyphs from icon fonts.
+
+**UI strings**: `const char *` table at flash `0x53154`: 10 languages x 219 UTF-8 strings (index 0
+is the language's own name). Order: de, en, fr, it, ja, nl, pl, pt, ro, es. A 10-entry array of
+per-language table pointers is at `0x48770` (copies at `0x48798` and `0x101FE8`).
+`get_lang_str(id)` (0xD01F8C) returns a string in the current language.
+
+**Fonts**: 16-byte glyph descriptors
+(`u32 bitmap_index, u32 adv_w, u16 box_w, u16 box_h, i16 ofs_x, i16 ofs_y`), glyph bitmaps packed
+continuously, MSB first. Two kinds:
+
+- "sl" fonts (9, all in `.data`): custom per-font `get_glyph_dsc`/`get_glyph_bitmap` functions
+  (e.g. `0xD055BB`/`0xD05579`). A single cmap: `range_start` = first code, `range_length` = last
+  code, `unicode_list` = sorted absolute u16 codes, binary searched; glyph id = index in that list.
+  `adv_w` is in whole pixels. Layout in `.data`: dsc (0x18) + glyph cache (8) + `lv_font_t` (0x18).
+  - `font_464b0`: the UI text font (`lv_font_t` at RAM `0x819C98`), 1 bpp, line height 15, 3237
+    glyphs (Latin, Latin-1, some Latin Extended, Hebrew, kana, ~2400 CJK). Missing glyphs used by
+    the strings: Polish/Romanian letters (ă ł ț ș ć ś ń ż ź Ł Ś Ș ţ), ¡ ¿ °, and 10 CJK
+    characters. These render as gaps unless added with a font rebuild.
+  - `font_46440`, `font_46470`: clock digits; the others are FontAwesome-style icon fonts.
+- Standard `lv_font_fmt_txt` fonts in flash (`get_glyph_dsc` = `0xD374ED`): small icon fonts in
+  the Private Use Area (U+E6xx, iconfont.cn) and a few digit/ASCII fonts, e.g. `0xC610F8`
+  (23 px clock digits, only `/0123456789:CELMOW`). The asset tools don't handle these yet.
+
+**Other data**: Unicode/GBK conversion table around `0xB8000`-`0xC4000` (FatFs code page); the
+`TONE` partition holds the alarm MP3.
+
+### SDK internals
+
+**Calling the firmware.** `fw.h` declares each function as a macro that casts its address (with the
+Thumb bit) to a function pointer, so calls compile to `ldr` + `blx` with no linking against the
+firmware. Code is linked at `0xDD0000` (flash `0x1D0000`, up to `0x1FC000`, 176 KB) and runs in
+place.
+
+**APP menu hook** (`sdk/src/menu.c`).
+- The home grid's "APP" item opens page 0x53, `page_home_menu_create` (0xD0FC64): a list with
+  Alarm and Pictures (string ids 7 and 4).
+- Its rows are made by `fw_list_item_create` (0xD0267C), each with a FontAwesome symbol label
+  (font `0xC810C4`) and a text label. The page state is at `*(0x81CE5C) + 0x1DC`.
+- `sdk/patches.json` redirects the `bl page_home_menu_create` at `0xD04C04` in `view_page_create`
+  to `hook_home_menu_create`. The hook calls the original, then appends one row per
+  `FW_MENU_ITEM`.
+- The linker script collects the `FW_MENU_ITEM` entries between `__fw_menu_start` and
+  `__fw_menu_end`.
+- Each row's key handler opens the app on ENTER and passes other keys to
+  `page_home_menu_event_cb` (0xD0FB2C), so navigation and Back keep working.
+- Page 0x51 (`page_expand_home_create`, a 2x3 icon grid) exists in the code but is not reachable
+  on this model.
+
+**Overlays** (`sdk/src/overlay.c`).
+- `fw_overlay_open` creates a full-screen object on `lv_layer_top()`, adds it to the view's key
+  group (`*(*(0x81CE5C) + 0x30)`), focuses it and freezes the group, so the app gets all key
+  events.
+- `fw_overlay_close` deletes it and gives focus back to the menu row.
+- `on_delete` runs from `LV_EVENT_DELETE`, also if the firmware tears down the UI by itself, so
+  it is the one place to stop timers and free memory.
+
+**LVGL heap.** `lv_mem_init` (0xD39014) creates a 40 KB TLSF pool for the whole UI. The image cache
+is disabled (`_lv_img_cache_open` decodes on every draw), so an `lv_img_dsc_t` in RAM can be
+changed in place and redrawn with `lv_obj_invalidate`. Mp3tris draws its board as a 70x140
+`LV_IMG_CF_INDEXED_4BIT` image (16-color palette of `b, g, r, a` entries, then 4-bit pixels with
+the first pixel in the high nibble; alpha must be 0xFF).
+
+**Useful addresses** (all in `fw.h`): `lv_mem_alloc` 0xD3909C, `lv_mem_free` 0xD39030,
+`lv_obj_create` 0xD2A250, `lv_obj_del` 0xD2E3B4, `lv_obj_invalidate` 0xD2B770, `lv_label_create`
+0xD3F1FC, `lv_img_create` 0xD3E764, `lv_img_set_src` 0xD3E77C, `lv_timer_create` 0xD39F34,
+`lv_timer_del` 0xD39FA4, `lv_tick_get` 0xD37980, `lv_obj_add_event_cb` 0xD280C8, and the style
+setters from 0xD2E074.
+
+### Buttons and key events
+
+Measured with the Key test app:
+
+| Button | `LV_EVENT_KEY` code | `fw.h` name |
+|---|---|---|
+| Left | 0x14 (`LV_KEY_LEFT`) | `FW_KEY_LEFT` |
+| Right | 0x13 (`LV_KEY_RIGHT`) | `FW_KEY_RIGHT` |
+| Top | 0xA0 | `FW_KEY_UP` |
+| Center | 0x0A (`LV_KEY_ENTER`) | `FW_KEY_CENTER` |
+| Bottom | 0x81 (the firmware's "leave page") | `FW_KEY_BACK` |
+
+Center (ENTER) works differently from the others:
+- `LV_EVENT_PRESSED` arrives when it goes down.
+- `LV_EVENT_RELEASED`, and then its `LV_EVENT_KEY`, arrive when it is let go.
+
+For an immediate reaction, act on `PRESSED`. Use the `KEY` event only as a fallback when no
+`PRESSED` came first; Flutter and Mp3tris both do this. Event codes in this build: PRESSED 1,
+RELEASED 8, KEY 13, DELETE 33.
+
+Other key codes seen in page handlers: 9/11 NEXT/PREV, 27 ESC, and vendor codes 0x87, 0x8A, 0x92,
+0x98, 0x9B, 0xA3.
+
+### Ghidra
+
+- `ghidra/import.sh [firmware.bin]` builds `ghidra/project/sl6801.gpr` with two programs:
+  - `sl6801_app`: the main firmware, 4811 functions, 354 named.
+  - `sl6801_boot`: the bootloader. Only its block at 0x81FBC0+ is the bootloader proper.
+- The scripts in `ghidra/scripts/`:
+  - `SL6801Setup.java` sets up the memory map (flash, RAM copies, a stub ROM), vectors, and
+    function seeds from code pointers.
+  - `SL6801Names.java` names functions after their `__func__` strings and exports
+    `ghidra/out/<program>_functions.csv`.
+  - `SL6801Fixups.java` clears the "no return" flag on ROM stubs such as `rom_printf` (0x2B0).
+- `ghidra/decompile.sh <app|boot> <out.c> <name|0xaddr>...` decompiles from the saved project
+  without re-analysis.
+
+### Windows flashing setup
+
+- **Driver.** In bootloader mode the device (`301A:2800`) binds to Windows' USB mass-storage
+  driver. In Zadig, use Options > List All Devices and replace that driver with WinUSB for this
+  VID/PID only. Card reader mode (`301A:2801`) is unaffected.
+- **Flasher.** `smartlink_flash/` is a clone of github.com/ilyakurdyukov/smartlink_flash (commit
+  49d51d1) with `patches/smtlink_dump-write_flash-offset.patch` applied using `git apply`.
+- **Building it.** In MSYS2 UCRT64, run `pacman -S mingw-w64-ucrt-x86_64-libusb make`, then
+  `make CC=gcc` from a UCRT64 shell. Copy `libusb-1.0.dll` next to `smtlink_dump.exe` so it runs
+  from any shell.
+- **Using it.** Always start a command with `init`, e.g.
+  `smartlink_flash/smtlink_dump.exe init flash_id read_flash 0 2M backup.bin`.
+
+## Gotchas
+
+- **Upstream `smtlink_dump` bug.** `write_flash <addr> <file_offset> <size> <file>` ignores
+  `<file_offset>` and always takes data from the start of the file. Writing selected regions of an
+  image with it puts the image header into those sectors and the device won't boot.
+  - The local copy is patched (`mem[src_offs + i + j]` in `write_flash()`).
+  - Flashing the whole image with `write_flash 0 0 0` is correct either way.
+- **No writable globals in apps** (see [Writing a new app](#writing-a-new-app)).
+- **Center's KEY event comes on release**; use `LV_EVENT_PRESSED` for responsiveness.
+- **`LV_EVENT_DELETE` is 33** in this build (not 34).
+- **Images resized by `pack`** may be cropped or misplaced if the UI code hardcodes the original size.
+- **`slfw.Image` copies its input buffer**; code that edits an image must write to `img.data`.
+
+## Open questions
+
+- What the 130 KB zero run inside FIRM is for, and FIRM header field +0x10.
+- Whether the vendor firmware ever writes to the free flash area (no problems seen so far).
+- A boot ROM dump, to name the ROM functions the app calls.
+- Somewhere persistent to store app data (e.g. high scores) without globals: a free field in the
+  `PSMP` settings or a spare pointer in the firmware's RAM.
