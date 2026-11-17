@@ -158,31 +158,43 @@ its `boot` block (0x81FBC0+) is the bootloader proper.
   (view context at `*(0x81CE5C)`: key group at +0x30, APP page state at +0x1D4).
 - `sdk/app.ld`: code at flash `0x1D0000` (runs at `0xDD0000`), up to `0x1FC000`. `.data`/`.bss`
   must be empty; keep state in `lv_mem_alloc` memory.
-- `sdk/build.py [--zig] <app dir>`: compiles with arm-none-eabi-gcc (xPack 15.2.1 in
-  `C:/Tools/arm-gnu-toolchain`, override with `ARM_GCC_BIN`) or with `zig cc` (ziglang pip
-  package). Thumb-2, Cortex-M4, soft-float ABI. Writes `build/app.bin`, `build/app.json`, and with
-  gcc also `app.map` and `app.lst` (disassembly with source). `sdk/src/*.c` is linked into every
-  app (memset/memcpy/memmove/strlen). `patches.json` lists BL call
-  sites to redirect to app symbols, with the expected original target as a safety check.
-- `tools/assets.py pack firmware_2M.bin work out.bin --app <app dir>/build/app.json`: writes the
-  code and patches the BLs. Asset data then only uses `0x186000` up to the app.
-- `sdk/include/sdk.h` + `sdk/src/`: shared code linked into every app. `menu.c` is the APP menu
-  hook; an app only defines `app_menu_items[]` (symbol, text, open function). `overlay.c` gives a
-  full-screen overlay that owns key input and calls `on_delete` when torn down. Also small
+- `sdk/build.py [--zig] [-o OUT] <app dir>...`: links one or more apps into a single image, e.g.
+  `sdk/build.py sdk/apps/flutter sdk/apps/mp3tris`. Compiles with arm-none-eabi-gcc (xPack 15.2.1
+  in `C:/Tools/arm-gnu-toolchain`, override with `ARM_GCC_BIN`) or with `zig cc` (ziglang pip
+  package). Thumb-2, Cortex-M4, soft-float ABI. Each app is compiled separately (its
+  `assets/X.png` become headers `X.h` with `img_X`, visible to that app only). Writes
+  `sdk/build/app.bin`, `app.json`, and with gcc also `app.map` and `app.lst` (disassembly with
+  source). `sdk/patches.json` (plus an app's optional `patches.json`) lists BL call sites to
+  redirect to app symbols, with the expected original target as a safety check.
+- `tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json`: writes the code
+  and patches the BLs. Asset data then only uses `0x186000` up to the app.
+- `sdk/include/sdk.h` + `sdk/src/`: shared code linked into every image. `menu.c` is the APP menu
+  hook; an app adds a row with `FW_MENU_ITEM(symbol, text, open)` (collected by the linker
+  script into `__fw_menu_start`..`__fw_menu_end`, in the order the apps were given). `overlay.c`
+  gives a full-screen overlay that owns key input and calls `on_delete` when torn down. Also small
   formatting helpers, `fw_label`, `fw_rect`, and memset/memcpy/memmove/strlen.
-- Apps: `sdk/apps/hello` (key test) and `sdk/apps/flutter` (game: Center flaps, Back exits;
-  `art.py` draws the sprites into `assets/`). `assets/*.png` become `build/gen/*.h` automatically.
+- Apps: `sdk/apps/hello` (key test), `sdk/apps/flutter` (game: Center flaps, Back exits;
+  `art.py` draws the sprites into `assets/`), `sdk/apps/mp3tris` (falling blocks: Left/Right
+  move, Up rotates, holding Center falls fast, Back exits).
 - LVGL timers: `lv_timer_create` 0xD39F34, `lv_timer_del` 0xD39FA4, `lv_tick_get` 0xD37980.
+- LVGL heap: `lv_mem_init` (0xD39014) creates a 40 KB TLSF pool at 0x876000, shared with the whole
+  UI, so apps should not allocate large buffers or hundreds of objects. The image cache is
+  disabled (`_lv_img_cache_open` decodes every time), so an `lv_img_dsc_t` in RAM can be changed
+  in place and redrawn with `lv_obj_invalidate` (0xD2B770). Mp3tris draws its board as a 70x140
+  `LV_IMG_CF_INDEXED_4BIT` image (about 5 KB).
+- Host testing: an app's `main.c` can be compiled with MSYS2 gcc by `#undef`-ing the `fw.h`
+  macros it uses and defining stubs, then `#include "main.c"`. See
+  `sdk/apps/mp3tris/test/host_test.c` (and `show.py`, which renders its image dumps to PNG).
 - `tools/img2c.py`: PNG to `lv_img_dsc_t` C header. `tools/xref.py`: find BL/B.W callers.
 
-### Hook used by `sdk/apps/hello`
+### APP menu hook (`sdk/src/menu.c`)
 
 `view_page_create` (0xD04A1C) is a switch calling each page's create function. The home grid's
 "APP" item opens page 0x53, `page_home_menu_create`: a list with Alarm and Pictures (string ids
 7 and 4), rows made by `fw_list_item_create` (0xD0267C) with a FontAwesome symbol label
 (font `0xC810C4`) and a text label. The `bl` at `0xD04C04` is redirected to
-`hook_home_menu_create`, which calls the original and appends a "Custom app" row with its own key
-handler (ENTER opens the app, other keys go to `page_home_menu_event_cb`). The app is a
+`hook_home_menu_create`, which calls the original and appends one row per `FW_MENU_ITEM`, each
+with its own key handler (ENTER opens the app, other keys go to `page_home_menu_event_cb`). The app is a
 full-screen object on `lv_layer_top()`, added to the view's key group, focused, with the group
 frozen.
 

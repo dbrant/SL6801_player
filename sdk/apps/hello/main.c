@@ -51,7 +51,4 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 }
 
-const fw_menu_item_t app_menu_items[] = {
-	{FW_SYMBOL_OK, "Key test", open},
-};
-const uint8_t app_menu_item_count = sizeof(app_menu_items) / sizeof(app_menu_items[0]);
+FW_MENU_ITEM(FW_SYMBOL_OK, "Key test", open);

@@ -32,6 +32,9 @@ typedef struct {
 
 #define LV_IMG_CF_TRUE_COLOR 4
 #define LV_IMG_CF_TRUE_COLOR_CHROMA_KEYED 6
+/* Palette of 16 lv_color32_t (b, g, r, a) followed by rows of 4-bit indices, first pixel in the
+ * high nibble. Drawn with per-entry alpha, so opaque entries need a = 0xFF. */
+#define LV_IMG_CF_INDEXED_4BIT 9
 #define LV_IMG_HEADER(cf, w, h) ((uint32_t)(cf) | ((uint32_t)(w) << 10) | ((uint32_t)(h) << 21))
 
 /* lv_group_t: frozen is bit 0 and editing bit 1 of the byte at offset 0x18. */
@@ -106,6 +109,8 @@ static inline lv_color_t lv_rgb(uint8_t r, uint8_t g, uint8_t b)
 
 #define lv_mem_alloc FW_FN(0x00D3909C, void *, (size_t size))
 #define lv_mem_free FW_FN(0x00D39030, void, (void *p))
+/* The LVGL heap is a 40 KB TLSF pool shared with the whole UI. The image cache is disabled
+ * (LV_IMG_CACHE_DEF_SIZE 0), so images in RAM can be changed in place and redrawn. */
 
 #define lv_disp_get_layer_top FW_FN(0x00D27EF0, lv_obj_t *, (void *disp))
 #define lv_disp_get_scr_act FW_FN(0x00D27E88, lv_obj_t *, (void *disp))
@@ -122,6 +127,7 @@ static inline lv_color_t lv_rgb(uint8_t r, uint8_t g, uint8_t b)
 #define lv_obj_align FW_FN(0x00D2B406, void, (lv_obj_t * obj, uint8_t align, lv_coord_t x, lv_coord_t y))
 #define lv_obj_add_flag FW_FN(0x00D2A268, void, (lv_obj_t * obj, uint32_t f))
 #define lv_obj_clear_flag FW_FN(0x00D2A2AE, void, (lv_obj_t * obj, uint32_t f))
+#define lv_obj_invalidate FW_FN(0x00D2B770, void, (lv_obj_t * obj))
 
 #define lv_timer_create FW_FN(0x00D39F34, lv_timer_t *, (lv_timer_cb_t cb, uint32_t period, void *user_data))
 #define lv_timer_del FW_FN(0x00D39FA4, void, (lv_timer_t * t)) /* allowed inside the timer's own callback */

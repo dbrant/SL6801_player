@@ -9,20 +9,23 @@ void *memmove(void *dst, const void *src, size_t n);
 size_t strlen(const char *s);
 
 /* ---------------------------------------------------------------- APP menu entries
- * Each app defines app_menu_items[] / app_menu_item_count; sdk/src/menu.c appends them as rows
- * to the firmware's "APP" menu (hook_home_menu_create, patched over the call at 0xD04C04). */
+ * FW_MENU_ITEM(symbol, text, open) adds a row to the firmware's "APP" menu; sdk/src/menu.c
+ * appends all rows (hook_home_menu_create, patched over the call at 0xD04C04). The entries are
+ * collected by the linker script, so several apps can be linked into one image. */
 typedef struct {
 	const char *symbol; /* UTF-8 of a FontAwesome glyph present in FW_FONT_ICONS */
 	const char *text;
 	void (*open)(lv_obj_t *return_focus);
 } fw_menu_item_t;
 
-extern const fw_menu_item_t app_menu_items[];
-extern const uint8_t app_menu_item_count;
+#define FW_MENU_ITEM(symbol, text, open)                                                            \
+	static const fw_menu_item_t fw_menu_item_##open __attribute__((used, section(".fw_menu"))) = { \
+		symbol, text, open}
 
 #define FW_SYMBOL_PLAY "\xEF\x81\x8B"  /* U+F04B */
 #define FW_SYMBOL_OK "\xEF\x80\x8C"    /* U+F00C */
 #define FW_SYMBOL_AUDIO "\xEF\x80\x81" /* U+F001 */
+#define FW_SYMBOL_BARS "\xEF\x83\x89"  /* U+F0C9 */
 
 /* ---------------------------------------------------------------- full-screen overlays
  * A full-screen object on the top layer that takes all key input until it is deleted.

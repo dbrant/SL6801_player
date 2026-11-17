@@ -1,5 +1,5 @@
 /* Injected code lives in free flash (offset 0x1D0000) and runs in place at 0xC00000 + offset.
- * build.py sets the entry symbol to the app's first patch target. */
+ * build.py sets the entry symbol to the first patch target. */
 
 MEMORY
 {
@@ -12,6 +12,11 @@ SECTIONS
 		KEEP(*(.text.entry*))
 		*(.text .text.*)
 		*(.rodata .rodata.*)
+		/* FW_MENU_ITEM entries, in the order the apps were given to build.py */
+		. = ALIGN(4);
+		__fw_menu_start = .;
+		KEEP(*(.fw_menu))
+		__fw_menu_end = .;
 	} > CODE
 
 	.data : { *(.data .data.*) } > CODE

@@ -396,7 +396,4 @@ static void open(lv_obj_t *return_focus)
 	g->timer = lv_timer_create(tick_cb, STEP_MS / 2, g);
 }
 
-const fw_menu_item_t app_menu_items[] = {
-	{FW_SYMBOL_PLAY, "Flutter", open},
-};
-const uint8_t app_menu_item_count = sizeof(app_menu_items) / sizeof(app_menu_items[0]);
+FW_MENU_ITEM(FW_SYMBOL_PLAY, "Flutter", open);

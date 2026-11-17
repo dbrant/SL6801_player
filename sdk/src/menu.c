@@ -31,6 +31,8 @@ static void add_row(lv_obj_t *list, const fw_menu_item_t *entry)
 	fw_list_item_layout(row, 0, 0, 2);
 }
 
+extern const fw_menu_item_t __fw_menu_start[], __fw_menu_end[]; /* app.ld */
+
 /* Replaces the call to page_home_menu_create in view_page_create. */
 __attribute__((used, section(".text.entry"))) int hook_home_menu_create(void)
 {
@@ -38,7 +40,7 @@ __attribute__((used, section(".text.entry"))) int hook_home_menu_create(void)
 	if (ret != 0)
 		return ret;
 	lv_obj_t *list = lv_obj_get_parent(fw_home_menu_page()->item[0]);
-	for (uint8_t i = 0; i < app_menu_item_count; i++)
-		add_row(list, &app_menu_items[i]);
+	for (const fw_menu_item_t *item = __fw_menu_start; item < __fw_menu_end; item++)
+		add_row(list, item);
 	return 0;
 }

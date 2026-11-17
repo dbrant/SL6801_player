@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 
 # SDK build output (sdk/build.py)
+sdk/build/
 sdk/apps/*/build/
 
 # Firmware images made by pack, readbacks and backups; the original dump stays tracked
