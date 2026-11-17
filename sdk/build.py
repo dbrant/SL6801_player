@@ -2,7 +2,8 @@
 
 Usage: build.py [--zig] <app dir>   e.g. build.py sdk/apps/hello
 Uses arm-none-eabi-gcc (ARM_GCC_BIN, default C:/Tools/arm-gnu-toolchain/bin), or zig cc from the
-ziglang pip package with --zig. Outputs <app dir>/build/: app.elf, app.bin, app.json (and app.map,
+ziglang pip package with --zig. Compiles <app dir>/*.c plus sdk/src/*.c; each <app dir>/assets/X.png
+becomes build/gen/X.h with an lv_img_dsc_t named img_X. Outputs <app dir>/build/: app.elf, app.bin, app.json (and app.map,
 app.lst with gcc). app.json is what `assets.py pack --app` reads: load address, flash offset and
 the BL patches pointing firmware call sites at app symbols. The app dir's patches.json lists the
 patches as {"bl_at": "0x...", "target": "symbol", "expect": "0x..."}.
@@ -84,7 +85,15 @@ def main():
     os.makedirs(out, exist_ok=True)
     srcs = sorted(os.path.join(app, f) for f in os.listdir(app) if f.endswith(".c"))
     srcs += [os.path.join(SDK, "src", f) for f in sorted(os.listdir(os.path.join(SDK, "src"))) if f.endswith(".c")]
-    incs = ["-I", os.path.join(SDK, "include"), "-I", app]
+    gen = os.path.join(out, "gen")
+    os.makedirs(gen, exist_ok=True)
+    assets = os.path.join(app, "assets")
+    for f in sorted(os.listdir(assets)) if os.path.isdir(assets) else []:
+        if f.endswith(".png"):  # assets/name.png -> #include "name.h", symbol img_name
+            name = f[:-4]
+            run([sys.executable, "-I", os.path.join(SDK, "..", "tools", "img2c.py"), os.path.join(assets, f),
+                 os.path.join(gen, name + ".h"), "img_" + name])
+    incs = ["-I", os.path.join(SDK, "include"), "-I", app, "-I", gen]
     ld = os.path.join(SDK, "app.ld")
     patches = json.load(open(os.path.join(app, "patches.json")))
     elf = (compile_zig if a.zig else compile_gcc)(srcs, incs, ld, out, patches[0]["target"])

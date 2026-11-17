@@ -54,8 +54,11 @@ typedef struct {
 
 typedef void (*lv_event_cb_t)(lv_event_t *e);
 
+#define LV_EVENT_ALL 0
+#define LV_EVENT_PRESSED 1
+#define LV_EVENT_RELEASED 8
 #define LV_EVENT_KEY 13
-#define LV_EVENT_DELETE 34
+#define LV_EVENT_DELETE 33
 
 #define LV_KEY_NEXT 9
 #define LV_KEY_ENTER 10
@@ -63,7 +66,13 @@ typedef void (*lv_event_cb_t)(lv_event_t *e);
 #define LV_KEY_RIGHT 19
 #define LV_KEY_LEFT 20
 #define LV_KEY_ESC 27
-#define FW_KEY_BACK 0x81 /* the firmware's pages treat this as "leave page" */
+/* Physical buttons on this player, as seen in LV_EVENT_KEY. ENTER's KEY event arrives on release;
+ * LV_EVENT_PRESSED arrives on press. */
+#define FW_KEY_BACK 0x81 /* bottom button; the firmware's pages treat it as "leave page" */
+#define FW_KEY_UP 0xA0   /* top button */
+#define FW_KEY_CENTER LV_KEY_ENTER
+#define FW_KEY_LEFT LV_KEY_LEFT
+#define FW_KEY_RIGHT LV_KEY_RIGHT
 
 #define LV_ALIGN_TOP_MID 2
 #define LV_ALIGN_CENTER 9
@@ -74,6 +83,17 @@ typedef void (*lv_event_cb_t)(lv_event_t *e);
 
 #define LV_OBJ_FLAG_HIDDEN (1u << 0)
 #define LV_OBJ_FLAG_CLICKABLE (1u << 1)
+#define LV_OBJ_FLAG_SCROLLABLE (1u << 4)
+
+typedef struct _lv_timer_t {
+	uint32_t period;
+	uint32_t last_run;
+	void (*timer_cb)(struct _lv_timer_t *t);
+	void *user_data;
+	int32_t repeat_count;
+	uint8_t paused;
+} lv_timer_t;
+typedef void (*lv_timer_cb_t)(lv_timer_t *t);
 
 static inline lv_color_t lv_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -101,6 +121,12 @@ static inline lv_color_t lv_rgb(uint8_t r, uint8_t g, uint8_t b)
 #define lv_obj_set_pos FW_FN(0x00D2B338, void, (lv_obj_t * obj, lv_coord_t x, lv_coord_t y))
 #define lv_obj_align FW_FN(0x00D2B406, void, (lv_obj_t * obj, uint8_t align, lv_coord_t x, lv_coord_t y))
 #define lv_obj_add_flag FW_FN(0x00D2A268, void, (lv_obj_t * obj, uint32_t f))
+#define lv_obj_clear_flag FW_FN(0x00D2A2AE, void, (lv_obj_t * obj, uint32_t f))
+
+#define lv_timer_create FW_FN(0x00D39F34, lv_timer_t *, (lv_timer_cb_t cb, uint32_t period, void *user_data))
+#define lv_timer_del FW_FN(0x00D39FA4, void, (lv_timer_t * t)) /* allowed inside the timer's own callback */
+#define lv_tick_get FW_FN(0x00D37980, uint32_t, (void))
+static inline uint32_t lv_tick_elaps(uint32_t prev) { return lv_tick_get() - prev; }
 #define lv_obj_add_event_cb \
 	FW_FN(0x00D280C8, void *, (lv_obj_t * obj, lv_event_cb_t cb, uint8_t filter, void *user_data))
 #define lv_obj_remove_event_cb FW_FN(0x00D28148, bool, (lv_obj_t * obj, lv_event_cb_t cb))
@@ -146,6 +172,11 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
 
 /* The UI's 12 px, 1 bpp multilingual font (lv_font_t in .data). */
 #define FW_FONT_UI ((const lv_font_t *)0x00819C98)
+/* 23 px anti-aliased clock font; only has "/0123456789:CELMOW". */
+#define FW_FONT_DIGITS ((const lv_font_t *)0x00C610F8)
+
+/* Cortex-M SysTick current value, handy as a random seed. */
+#define FW_SYSTICK_VAL (*(volatile uint32_t *)0xE000E018)
 
 /* View context: *(FW_VIEW_CTX) points to a struct holding the key group and per-page state. */
 #define FW_VIEW_CTX (*(uint8_t **)0x0081CE5C)

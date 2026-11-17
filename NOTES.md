@@ -166,6 +166,13 @@ its `boot` block (0x81FBC0+) is the bootloader proper.
   sites to redirect to app symbols, with the expected original target as a safety check.
 - `tools/assets.py pack firmware_2M.bin work out.bin --app <app dir>/build/app.json`: writes the
   code and patches the BLs. Asset data then only uses `0x186000` up to the app.
+- `sdk/include/sdk.h` + `sdk/src/`: shared code linked into every app. `menu.c` is the APP menu
+  hook; an app only defines `app_menu_items[]` (symbol, text, open function). `overlay.c` gives a
+  full-screen overlay that owns key input and calls `on_delete` when torn down. Also small
+  formatting helpers, `fw_label`, `fw_rect`, and memset/memcpy/memmove/strlen.
+- Apps: `sdk/apps/hello` (key test) and `sdk/apps/flutter` (game: Center flaps, Back exits;
+  `art.py` draws the sprites into `assets/`). `assets/*.png` become `build/gen/*.h` automatically.
+- LVGL timers: `lv_timer_create` 0xD39F34, `lv_timer_del` 0xD39FA4, `lv_tick_get` 0xD37980.
 - `tools/img2c.py`: PNG to `lv_img_dsc_t` C header. `tools/xref.py`: find BL/B.W callers.
 
 ### Hook used by `sdk/apps/hello`
@@ -181,6 +188,9 @@ frozen.
 
 Page 0x51 (`page_expand_home_create`, a 2x3 icon grid with 4 icons) is not reachable from the
 UI on this model.
+
+Physical buttons (measured with the key test app): Left 0x14, Right 0x13, Top 0xA0, Center 0x0A
+(LV_KEY_ENTER; its KEY event comes on release, LV_EVENT_PRESSED on press), Bottom 0x81 (back).
 
 Key codes seen in page handlers: 9/11 NEXT/PREV, 10 ENTER, 19/20 RIGHT/LEFT, 27 ESC, and vendor
 codes 0x81 (leave page; "down" on the home grid), 0x87, 0x8A, 0x92, 0x98, 0x9B, 0xA0, 0xA3.
