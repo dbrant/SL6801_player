@@ -10,14 +10,16 @@ What works so far, all tested on the device:
   all checksums fixed. Edited data goes to free flash.
 - **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
-- **Apps**: *Key test* (shows key codes), *Flutter* (a side-scrolling flapping game) and
-  *Mp3tris* (a falling-block puzzle).
+- **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
+  *Key test* (shows key codes), and *Sound test* (exercises audio functions).
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
   scripts.
 
 `firmware_2M.bin` is the original 2 MB flash dump of this unit. Keep it unmodified: every image is
 built from it.
+
+`out.bin` is the new firmware, with all the enhancements and apps.
 
 ## Contents
 
@@ -53,7 +55,7 @@ Build the apps, pack them with the edited assets in `work/`, and flash:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
 ```
 
-The new rows appear under **APP** on the home screen, below Alarm and Pictures.
+The new rows appear under **Apps** on the home screen, below Alarm and Pictures.
 
 Before the first write to a new unit, back up its flash:
 `smartlink_flash/smtlink_dump.exe init flash_id read_flash 0 2M backup.bin`.
@@ -139,8 +141,8 @@ writes the partitions; `slfw.py <image> fixcrc <out>` recomputes the checksums.
 
 ### Flashing
 
-1. Put the player in bootloader mode: turn it off, then hold the boot key while connecting USB.
-   It enumerates as `301A:2800`.
+1. Put the player in bootloader mode: turn it off, then hold the boot key (the Left key on my device)
+while connecting USB. It enumerates as `301A:2800`.
 2. Run `smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin`.
 
 Flash the whole image with `write_flash 0 0 0 <file>`. Only sectors that differ are rewritten,
@@ -679,9 +681,7 @@ and 0xA3 and record code 0x92 from the table above.
 - **Driver.** In bootloader mode the device (`301A:2800`) binds to Windows' USB mass-storage
   driver. In Zadig, use Options > List All Devices and replace that driver with WinUSB for this
   VID/PID only. Card reader mode (`301A:2801`) is unaffected.
-- **Flasher.** `smartlink_flash/` is a clone of github.com/ilyakurdyukov/smartlink_flash. Use a
-  version that includes the `write_flash` file offset fix; older builds ignore `<file_offset>`,
-  which only matters when writing selected regions of an image.
+- **Flasher.** [smartlink_flash](github.com/ilyakurdyukov/smartlink_flash).
 - **Building it.** In MSYS2 UCRT64, run `pacman -S mingw-w64-ucrt-x86_64-libusb make`, then
   `make CC=gcc` from a UCRT64 shell. Copy `libusb-1.0.dll` next to `smtlink_dump.exe` so it runs
   from any shell.
