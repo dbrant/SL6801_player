@@ -309,7 +309,16 @@ From strings and decompilation:
 - LVGL v8.3 (source path `F:\pen133_yp3_mp\spark2\src\gui8\lvgl\...`), configured with
   `LV_COLOR_16_SWAP=1`, `LV_USE_USER_DATA=0`, 16-bit `lv_coord_t`, `LV_FONT_FMT_TXT_LARGE`, and
   the image cache disabled. Asserts include function names, which helps naming functions.
-- FatFs (FAT32/exFAT), libjpeg, codecs: MP3, FLAC, APE, WMA, AAC, OGG/Vorbis, SBC/mSBC.
+- FatFs (R0.14 style) with exFAT enabled:
+  - `check_fs` 0xD5609C recognizes the exFAT boot sector. The volume mount 0xD573E8 has the full
+    exFAT branch: version 1.00, 512-byte sectors, one FAT, allocation bitmap. `f_mkfs` 0xD58F38
+    can create exFAT.
+  - Partitions: an unpartitioned card or the 4 MBR primary partitions; no GPT handling was found.
+  - The SD driver's ioctl 3 (0xD46EB4) reads the boot sector and reports the volume's "dirty"
+    flag (FAT32 byte 0x41, exFAT VolumeFlags byte 0x6A). For a partitioned exFAT card it returns
+    1 when the flag is set. Who uses that result is not known yet.
+  - The bootloader has its own FatFs copy with the same exFAT signature check.
+- libjpeg, codecs: MP3, FLAC, APE, WMA, AAC, OGG/Vorbis, SBC/mSBC.
 - Bluetooth classic: A2DP source and sink, AVRCP, HFP.
 - Apps: music (database with artist/album/favorites, `.lrc` lyrics), video (MJPEG AVI), photo
   viewer, ebook, English dictionary, voice recorder (WAV/ADPCM to `0:\record`), FM radio, alarm,
@@ -395,6 +404,54 @@ the first pixel in the high nibble; alpha must be 0xFF).
 0xD3F1FC, `lv_img_create` 0xD3E764, `lv_img_set_src` 0xD3E77C, `lv_timer_create` 0xD39F34,
 `lv_timer_del` 0xD39FA4, `lv_tick_get` 0xD37980, `lv_obj_add_event_cb` 0xD280C8, and the style
 setters from 0xD2E074.
+
+### Pages and navigation
+
+- **View side:** `view_page_create` (0xD04A1C) switches on the view page id (list of `page_*_create`
+  functions in the Ghidra CSV). View event callbacks report key actions to the logic side with
+  `FUN_00D04430(page, action, index, ...)`.
+- **Logic side:** the "presenter" `pageN_*` functions decide what happens. They navigate with
+  `FUN_00CEEAFC(current, action, index, target_page)` and go back with `FUN_00CEEFE0`.
+- **Numbering:** presenter numbers equal view page ids for the low pages (e.g. `page20_*` is
+  video play, 0x14). For the highest pages they are one higher: `page81_*` is the password menu
+  (0x50), `page82_*` view 0x51, and `page84_*` the APP list (0x53). Where the offset starts
+  hasn't been pinned down.
+- **Home grid** (page 1, `FUN_00CE1E9C`): Music → 0x02, Video → 0x13, Ebook → 0x0C,
+  Recorder → 0x18, FM → 0x1A, APP → 0x53, Folder, Bluetooth → 0x23, Settings → 0x28. Index 10,
+  Pictures → 0x15, is handled but has no icon; Pictures moved into APP.
+- **APP list** (0x53): Alarm → 0x1E, Pictures → 0x15.
+- **Settings** (0x28): Language 0x29, Date/time 0x2A, Speaker 0x4C, Brightness 0x2D, Screen off
+  0x2E, Auto power-off 0x30, Sleep timer 0x4D, Device info 0x33, Storage 0x4E, then the actions
+  Restore factory settings, Update Playlist, and Format SD card.
+
+### Hidden features
+
+These pages are complete in the firmware, but no menu navigates to them on this model:
+
+- **Expand home** (0x51): a 2x3 icon grid with 4 icons: Pictures, Alarm, FM, and "Aa" with a
+  magnifier (dictionary). Its parts don't agree with each other:
+  - the label list is Ebook, Pictures, FM, Recorder, Settings;
+  - its presenter (`page82_img_process`, 0xCED5AC) sends the slots to Video, Pictures, Ebook,
+    Recorder, FM, Settings and Music.
+  It looks like an abandoned layout from another product variant.
+- **Dictionary** (0x37 `page_dict_input` keyboard entry, 0x38 `page_dict_play` result with a
+  pronunciation "Play" button):
+  - Data comes from `0:\dict` ("No Dictionary Data Detected" otherwise).
+  - Lookup `FUN_00CE0C20` binary-searches an index of 48-byte records: a 32-byte word, then
+    offset/length into a text file and into an audio file (up to 80 KB per word). The first 76
+    records are cached in RAM.
+  - The data file names have not been found yet.
+  - The navigation code has a case for entering 0x37 (`pstr_enter_page56`), but nothing calls
+    it with 0x37. The word display page also special-cases a few words ("eat", "keep", "know",
+    "spend", "dead", ...).
+- **Power-on password** (0x50 `page_pass_menu`: "Power-on password" on/off and "Change
+  password"; 0x4F `page_pass_input`): stored in NV settings (`pstr_pass_nv_save`). The menu itself
+  is not linked from Settings.
+- **Key light** (0x4B `page_set_keylight`, string "Key light"): probably for models with
+  backlit keys.
+
+Showing any of these needs a logic-side change: an APP row's ENTER handler (view side) can't
+navigate on its own. The APP presenter (`page84_*`, 0xCEDA8C) ignores indexes above 1.
 
 ### Video player
 
