@@ -16,7 +16,9 @@ What works so far, all tested on the device:
 - **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
   scripts.
 
-`firmware_2M.bin` is the original 2 MB flash dump of this unit. Keep it unmodified: every image is
+This repo depends on the original firmware being dumped in the current directory, and called
+`firmware_2M.bin`. Please dump the firmware on your own local setup, using the dumping instructions
+below. This must remain the original 2 MB flash dump of this unit. Keep it unmodified: every image is
 built from it.
 
 `out.bin` is the new firmware, with all the enhancements and apps.
@@ -57,15 +59,15 @@ smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
 
 The new rows appear under **Apps** on the home screen, below Alarm and Pictures.
 
-Before the first write to a new unit, back up its flash:
-`smartlink_flash/smtlink_dump.exe init flash_id read_flash 0 2M backup.bin`.
-To restore the stock firmware, flash `firmware_2M.bin` (or the backup) the same way.
+Before the first write to a new unit, read its flash memory:
+`smartlink_flash/smtlink_dump.exe init flash_id read_flash 0 2M firmware_2M.bin`.
+To restore the stock firmware, flash `firmware_2M.bin` the same way.
 
 ## Repository layout
 
 | Path | What |
 |---|---|
-| `firmware_2M.bin` | Original flash dump (tracked; never modified) |
+| `firmware_2M.bin` | Original flash dump (must not be modified) |
 | `work/` | Unpacked assets (`assets.py unpack`), including a custom 96x96 welcome banner |
 | `tools/slfw.py` | Flash image parser: layout, partitions, checksums |
 | `tools/assets.py` | Asset unpack/pack/preview, and app injection (`pack --app`) |

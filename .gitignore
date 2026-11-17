@@ -7,9 +7,8 @@ __pycache__/
 sdk/build/
 sdk/apps/*/build/
 
-# Firmware images made by pack, readbacks and backups; the original dump stays tracked
+# Firmware images made by pack, readbacks and backups.
 /*.bin
-!/firmware_2M.bin
 
 # Test videos and sound previews
 /*.avi
