@@ -41,8 +41,8 @@
   {
    "id": 2,
    "de": "E-buch",
-   "en": "Ebook",
-   "fr": "Ebook",
+   "en": "Ebooks",
+   "fr": "Ebooks",
    "it": "Ebook",
    "ja": "電子書籍",
    "nl": "Het e-boek",
@@ -2081,16 +2081,16 @@
   },
   {
    "id": 159,
-   "de": "APP",
-   "en": "APP",
-   "fr": "APP",
-   "it": "APP",
+   "de": "Apps",
+   "en": "Apps",
+   "fr": "Applications",
+   "it": "App",
    "ja": "適用",
-   "nl": "toepassing",
+   "nl": "Apps",
    "pl": "aplikacja",
-   "pt": "Protector de Ecrã",
+   "pt": "Apps",
    "ro": "aplicare",
-   "es": "APP"
+   "es": "Aplicaciones"
   },
   {
    "id": 160,
