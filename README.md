@@ -44,10 +44,10 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 | USB driver | WinUSB for `301A:2800`, installed with Zadig |
 | Ghidra (optional) | `C:/Tools/ghidra` (or `GHIDRA_HOME`), JDK via `JAVA_HOME` |
 
-Build the games, pack them with the edited assets in `work/`, and flash:
+Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -74,7 +74,7 @@ To restore the stock firmware, flash `firmware_2M.bin` (or the backup) the same 
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/hello`, `flutter`, `mp3tris` | Apps |
+| `sdk/apps/keytest`, `flutter`, `mp3tris` | Apps |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `patches/` | Fix for the upstream `smtlink_dump` (see [Gotchas](#gotchas)) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -121,7 +121,7 @@ writes the partitions; `slfw.py <image> fixcrc <out>` recomputes the checksums.
 ```
 
 - Links one or more apps into one image. Their menu rows appear in the order the apps are given,
-  e.g. `sdk/build.py sdk/apps/hello sdk/apps/flutter sdk/apps/mp3tris` for all three.
+  e.g. `sdk/build.py sdk/apps/flutter sdk/apps/mp3tris` for just the two games.
 - Uses arm-none-eabi-gcc by default, or `zig cc` (from the `ziglang` pip package) with `--zig`.
   Both produce working code (Thumb-2, Cortex-M4, soft-float ABI).
 - Each app directory's `*.c` files are compiled separately with the app's own include path. Each
