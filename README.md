@@ -648,8 +648,9 @@ The SDK patches the key manager's "keys ready" check (`bl 0xCF09D4` at 0xCDD5E6,
   hold.
 
 The games exit on `FW_KEY_BACK_LONG` and ignore a short Back, so a stray press doesn't end a
-game. In Mp3tris, every Center code except a release drops the piece one row: the press, and
-`FW_KEY_CENTER_LONG` or `_REPEAT`. A press on a landed piece locks it.
+game. In Mp3tris, a Center press drops the piece one row, and a press on a landed piece locks
+it. Center sends no repeat codes, so holding it (`FW_KEY_CENTER_LONG`, sent once) drops the piece
+to the bottom and locks it.
 
 Center (ENTER) works differently from the others:
 - `LV_EVENT_PRESSED` arrives when it goes down.

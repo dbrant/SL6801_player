@@ -155,18 +155,21 @@ int main(void)
 	int y0 = G->py;
 	advance(1700);
 	printf("fell %d rows in 1.7 s\n", G->py - y0);
-	/* Each Center press (PRESSED, then KEY on release) and each long code drops one row. */
+	/* Each Center press (PRESSED, then KEY on release) drops one row. */
 	y0 = G->py;
 	send(LV_EVENT_PRESSED, 0);
 	key(LV_KEY_ENTER);
 	printf("one press: %d row(s)\n", G->py - y0);
-	y0 = G->py;
+	/* Holding Center (PRESSED, then the long code) drops to the bottom and locks. */
+	uint8_t first = G->type;
+	uint32_t score0 = G->score;
+	send(LV_EVENT_PRESSED, 0);
 	key(FW_KEY_CENTER_LONG);
-	key(FW_KEY_CENTER_REPEAT);
-	printf("long + repeat: %d row(s)\n", G->py - y0);
+	printf("hold: locked %d, score +%u\n", G->type != first, (unsigned)(G->score - score0));
+	print_board("after hard drop");
 	/* Press until it locks: the press after landing locks it. */
 	int presses = 0;
-	uint8_t first = G->type;
+	first = G->type;
 	while (G->type == first && presses < 40) {
 		send(LV_EVENT_PRESSED, 0);
 		key(LV_KEY_ENTER);

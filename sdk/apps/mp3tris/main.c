@@ -1,10 +1,12 @@
 /*
- * Mp3tris: falling-block puzzle. Left/Right move, Up rotates, each Center press (and the long
- * press code) drops the piece one row, holding Back exits. Runs as a full-screen overlay opened
- * from the APP menu.
+ * Mp3tris: falling-block puzzle. Left/Right move, Up rotates, a Center press drops the piece one
+ * row, holding Center drops it to the bottom, holding Back exits. Runs as a full-screen overlay
+ * opened from the APP menu.
  *
  * The board and the next-piece preview are 16-color images in RAM that are redrawn in place;
  * one object per cell would not fit in the 40 KB LVGL heap.
+ * 
+ * Dmitry Brant, 2026
  */
 #include "sdk.h"
 #include "sfx.h"
@@ -441,6 +443,19 @@ static void step_down(game_t *g)
 	g->dirty = true;
 }
 
+/* Holding Center: drop to the bottom for 2 points per row and lock. */
+static void hard_drop(game_t *g)
+{
+	if (g->state != PLAYING)
+		return;
+	while (!grounded(g)) {
+		g->py++;
+		g->score += 2;
+	}
+	set_num(g->score_val, g->score);
+	lock_piece(g);
+}
+
 static void update(game_t *g, uint32_t dt)
 {
 	g->state_ms += dt;
@@ -537,9 +552,8 @@ static void input_cb(lv_event_t *e)
 		else
 			center_down(g);
 		break;
-	case FW_KEY_CENTER_LONG:
-	case FW_KEY_CENTER_REPEAT:
-		step_down(g);
+	case FW_KEY_CENTER_LONG: /* sent once; Center has no repeat code */
+		hard_drop(g);
 		break;
 	}
 	if (g->dirty) {
@@ -628,10 +642,10 @@ static void build_scene(game_t *g, lv_obj_t *root)
 	panel_label(root, "LEVEL", COLOR_HEAD, px, by + 116, pw);
 	g->level_val = panel_label(root, "1", COLOR_TEXT, px, by + 130, pw);
 
-	g->msg = fw_rect(root, w - 8, 120, COLOR_PANEL);
+	g->msg = fw_rect(root, w - 8, 136, COLOR_PANEL);
 	lv_obj_set_style_border_width(g->msg, 1, 0);
 	lv_obj_set_style_border_color(g->msg, COLOR_TITLE, 0);
-	lv_obj_set_pos(g->msg, 4, (h - 120) / 2);
+	lv_obj_set_pos(g->msg, 4, (h - 136) / 2);
 	g->msg_title = fw_label(g->msg, "", COLOR_TITLE);
 	g->msg_text = fw_label(g->msg, "", COLOR_TEXT);
 	lv_obj_set_style_text_align(g->msg_text, LV_TEXT_ALIGN_CENTER, 0);
@@ -655,7 +669,7 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_t *root = g->ov->root;
 	build_scene(g, root);
 	g->state = READY;
-	show_message(g, "Mp3tris", "Left/Right: move\nUp: rotate\nCenter: drop\nHold Back: exit\n\nCenter: start");
+	show_message(g, "Mp3tris", "Left/Right: move\nUp: rotate\nCenter: down\nHold Center: drop\nHold Back: exit\n\nCenter: start");
 
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_PRESSED, g);
 	lv_obj_add_event_cb(root, input_cb, LV_EVENT_RELEASED, g);

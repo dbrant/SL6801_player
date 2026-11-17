@@ -1,6 +1,8 @@
 /*
  * "Key test" entry in the APP menu: a full-screen overlay that shows the code of each key pressed.
  * Two back keys (or ESC) in a row close it, so a single back key's code can be seen too.
+ * 
+ * Dmitry Brant, 2026
  */
 #include "sdk.h"
 

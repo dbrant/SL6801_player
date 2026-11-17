@@ -1,4 +1,4 @@
-/* Appends the app's entries to the firmware's "APP" menu (page 0x53). */
+/* Appends the app's entries to the firmware's "Apps" menu (page 0x53). */
 #include "sdk.h"
 
 static void item_event_cb(lv_event_t *e)

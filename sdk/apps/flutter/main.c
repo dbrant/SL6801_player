@@ -4,6 +4,8 @@
  *
  * Positions and speeds are fixed point with 4 fractional bits; the simulation runs in fixed
  * 33 ms steps driven by an LVGL timer, catching up if the timer fires late.
+ * 
+ * Dmitry Brant, 2026
  */
 #include "bird_dazed.h"
 #include "bird_down.h"
