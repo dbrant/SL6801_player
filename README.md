@@ -11,7 +11,7 @@ What works so far, all tested on the device:
 - **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
 - **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
-  *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
+  *Mandelbrot* (a fractal explorer), *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
   oscilloscope view of the microphone), and *SD map* / *Flash map* (the SD card's or flash's
   sectors colored by entropy).
 - **Flashing from Windows** over USB with `smtlink_dump`.
@@ -54,7 +54,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -81,7 +81,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/flutter`, `mp3tris`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `mandel`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -206,6 +206,9 @@ Rules and tips:
   small elements draw into an indexed image instead (see Mp3tris).
 - **Animation**: use `lv_timer_create` and `lv_tick_get`; see Flutter for a fixed-step loop that
   catches up when the timer fires late.
+- **Heavy computation**: run it in a task below the UI task's priority (3) that sleeps briefly
+  now and then, and draw its results from a UI timer; see Mandelbrot. No floating point is
+  linked, so use fixed point.
 - **Input**: see [Buttons and key events](#buttons-and-key-events). Center needs special handling
   because its `LV_EVENT_KEY` only arrives on release.
 - **Menu icons**: `FW_FONT_ICONS` has only these FontAwesome codepoints: F001 F008 F00C F013 F01D
@@ -720,6 +723,11 @@ The games exit on `FW_KEY_BACK_LONG` and ignore a short Back, so a stray press d
 game. In Mp3tris, a Center press drops the piece one row, and a press on a landed piece locks
 it. Center sends no repeat codes, so holding it (`FW_KEY_CENTER_LONG`, sent once) drops the piece
 to the bottom and locks it.
+
+Mandelbrot also exits on a held Back and uses a short Back as "down", since Back is the bottom
+button and the player has no Down key. Center zooms in on its release (`FW_KEY_CENTER`), and
+holding it zooms out (`FW_KEY_CENTER_LONG`): a long press sends no release code, so the two
+never both fire.
 
 Center (ENTER) works differently from the others:
 - `LV_EVENT_PRESSED` arrives when it goes down.
