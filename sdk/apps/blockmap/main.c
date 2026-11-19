@@ -1,13 +1,14 @@
 /*
- * "SD map" entry in the APP menu: reads the SD card sector by sector and shows a page of 256
- * sectors as a 16x16 grid, each square colored by the Shannon entropy of the sector's bytes
- * on a hue scale from blue (all bytes equal) through cyan, green and yellow to red (8 bits per
- * byte; random data reaches about 7.6). A read error shows white.
- * Left/Right page through the card (hold to repeat), Up jumps 1/16 of the card ahead, Back exits.
+ * "SD map" and "Flash map" entries in the APP menu: show the SD card's 512-byte sectors or the
+ * flash's 4 KB sectors, 256 per page as a 16x16 grid, each square colored by the Shannon entropy
+ * of the block's bytes on a hue scale from blue (all bytes equal) through cyan, green and yellow
+ * to red (8 bits per byte; random data reaches about 7.6). A read error shows white.
+ * Left/Right page through the device (hold to repeat), Up jumps 1/16 of it ahead, Back exits.
  *
- * Reading the card from the UI task reboots the player after a few seconds, so a task reads the
- * requested page and stores a color per sector; a UI timer draws the colors. Closing signals the
- * task, and a UI timer joins it once it is done and frees the shared state, as in sdk/src/mic.c.
+ * Reading the SD card from the UI task reboots the player after a few seconds, so a task reads
+ * the requested page and stores a color per block; a UI timer draws the colors. Closing signals
+ * the task, and a UI timer joins it once it is done and frees the shared state, as in
+ * sdk/src/mic.c. The flash is memory mapped and read the same way, for simplicity.
  *
  * Dmitry Brant, 2026
  */
@@ -20,6 +21,8 @@
 #define GRID_W (COLS * CELL)
 #define GRID_H (ROWS * CELL)
 #define PALETTE_SIZE (256 * 4)
+#define SD_SHIFT 9     /* 512-byte sectors */
+#define FLASH_SHIFT 12 /* FW_FLASH_SECTOR */
 #define TICK_MS 30
 #define TASK_PRIORITY 4
 #define TASK_STACK 0x800
@@ -32,17 +35,18 @@ enum { PAL_GAP, PAL_UNREAD, PAL_ERROR, PAL_RAMP }; /* PAL_RAMP..255: entropy 0..
 
 /* Shared by the UI and the reader task, on the firmware heap. */
 typedef struct {
-	void *sd;
+	void *sd; /* NULL: read the flash */
 	void *task;
 	void *wake; /* given on a page change or to stop */
 	volatile bool stop;
 	volatile bool done; /* set by the task as its last action */
 	uint8_t reap_ticks;
-	uint32_t sectors;
+	uint8_t shift; /* log2 of the block size */
+	uint32_t blocks;
 	volatile uint32_t page;     /* written by the UI */
 	volatile uint32_t progress; /* bumped by the task after each change to color[] */
 	uint8_t color[PAGE];
-	uint8_t sector[FW_SD_SECTOR_SIZE];
+	uint8_t sector[1 << SD_SHIFT];
 	uint16_t hist[256];
 	uint8_t px[PALETTE_SIZE + GRID_W * GRID_H]; /* used by the UI only */
 } scan_t;
@@ -105,32 +109,38 @@ static uint32_t log2_q16(uint32_t x)
 	return (ip << 16) | frac;
 }
 
-/* Shannon entropy of the sector's bytes in bits per byte, Q16 (0 to 8 << 16). */
-static uint32_t entropy_q16(scan_t *s)
+/* Shannon entropy of a block's bytes in bits per byte, Q16 (0 to 8 << 16). */
+static uint32_t entropy_q16(scan_t *s, const uint8_t *data)
 {
 	memset(s->hist, 0, sizeof(s->hist));
-	for (int i = 0; i < FW_SD_SECTOR_SIZE; i++)
-		s->hist[s->sector[i]]++;
-	uint32_t sum = 0; /* sum of c * log2(c), Q16 */
+	for (uint32_t i = 0; i < 1u << s->shift; i++)
+		s->hist[data[i]]++;
+	uint32_t sum = 0; /* sum of c * log2(c), Q16; at most 4096 * 12 << 16 */
 	for (int v = 0; v < 256; v++)
 		if (s->hist[v] > 1)
 			sum += s->hist[v] * log2_q16(s->hist[v]);
-	return (9u << 16) - sum / FW_SD_SECTOR_SIZE; /* log2(512) = 9 */
+	return ((uint32_t)s->shift << 16) - (sum >> s->shift);
 }
 
-static uint8_t sector_color(scan_t *s, uint32_t sector)
+static uint8_t block_color(scan_t *s, uint32_t block)
 {
-	if (sector >= s->sectors)
+	if (block >= s->blocks)
 		return PAL_GAP;
-	if (fw_dev_read(s->sd, s->sector, 1, &sector) != 1)
-		return PAL_ERROR;
-	return (uint8_t)(PAL_RAMP + entropy_q16(s) * (RAMP_LEVELS - 1) / (8u << 16));
+	const uint8_t *data;
+	if (s->sd) {
+		if (fw_dev_read(s->sd, s->sector, 1, &block) != 1)
+			return PAL_ERROR;
+		data = s->sector;
+	} else {
+		data = (const uint8_t *)(uintptr_t)(FW_FLASH_BASE + (block << s->shift));
+	}
+	return (uint8_t)(PAL_RAMP + entropy_q16(s, data) * (RAMP_LEVELS - 1) / (8u << 16));
 }
 
 static void scan_task(void *arg)
 {
 	scan_t *s = arg;
-	uint32_t page = 0, next = PAGE + 1; /* next sector of the page to read; PAGE + 1: start over */
+	uint32_t page = 0, next = PAGE + 1; /* next block of the page to read; PAGE + 1: start over */
 	while (!s->stop) {
 		if (s->page != page || next > PAGE) {
 			page = s->page;
@@ -143,7 +153,7 @@ static void scan_task(void *arg)
 			continue;
 		}
 		for (int col = 0; col < COLS && s->page == page && !s->stop; col++, next++) {
-			s->color[next] = sector_color(s, page * PAGE + next);
+			s->color[next] = block_color(s, page * PAGE + next);
 			s->progress++;
 		}
 		fw_sem_take(&s->wake, ROW_PAUSE_MS);
@@ -172,14 +182,13 @@ static void fill_cell(app_t *app, int index, uint8_t color)
 		memset(p + y * GRID_W, color, CELL - 1);
 }
 
-static char *put_size(char *p, uint32_t sectors)
+static char *put_size(char *p, uint32_t kb)
 {
-	uint32_t mb = sectors / 2048;
-	if (mb < 1024) {
-		p = fw_put_dec(p, mb);
+	if (kb < 1024 * 1024) {
+		p = fw_put_dec(p, kb / 1024);
 		return fw_put_str(p, " MB");
 	}
-	uint32_t tenths = sectors / 209715; /* 2^21 sectors per GB / 10 */
+	uint32_t tenths = kb / 104858; /* 2^20 KB per GB / 10 */
 	p = fw_put_dec(p, tenths / 10);
 	p = fw_put_str(p, ".");
 	p = fw_put_dec(p, tenths % 10);
@@ -188,18 +197,26 @@ static char *put_size(char *p, uint32_t sectors)
 
 static void show_page(app_t *app)
 {
+	scan_t *s = app->scan;
+	uint32_t first = app->page * PAGE;
 	char text[40];
-	char *p = fw_put_str(text, "Sector ");
-	fw_put_dec(p, app->page * PAGE);
+	char *p;
+	if (s->sd) {
+		p = fw_put_str(text, "Sector ");
+		fw_put_dec(p, first);
+	} else {
+		p = fw_put_str(text, "Offset 0x");
+		fw_put_hex(p, first << s->shift, 6);
+	}
 	lv_label_set_text(app->title, text);
 	p = fw_put_dec(text, app->page + 1);
 	p = fw_put_str(p, "/");
 	p = fw_put_dec(p, app->pages);
 	p = fw_put_str(p, " ");
-	put_size(p, app->scan->sectors);
+	put_size(p, s->shift >= 10 ? s->blocks << (s->shift - 10) : s->blocks >> (10 - s->shift));
 	lv_label_set_text(app->info, text);
-	app->scan->page = app->page;
-	fw_sem_give(&app->scan->wake);
+	s->page = app->page;
+	fw_sem_give(&s->wake);
 }
 
 static void tick(lv_timer_t *t)
@@ -263,7 +280,7 @@ static void key_cb(lv_event_t *e)
 }
 
 /* Allocates the shared state and starts the reader task; NULL on failure. */
-static scan_t *start_scan(void *sd, uint32_t sectors)
+static scan_t *start_scan(void *sd, uint8_t shift, uint32_t blocks)
 {
 	if (fw_os_heap_free() < sizeof(scan_t) + HEAP_RESERVE)
 		return NULL;
@@ -271,11 +288,12 @@ static scan_t *start_scan(void *sd, uint32_t sectors)
 	if (!fw_is_ram(s))
 		return NULL;
 	s->sd = sd;
-	s->sectors = sectors;
+	s->shift = shift;
+	s->blocks = blocks;
 	memset(s->color, PAL_UNREAD, PAGE);
 	s->wake = fw_sem_create();
 	if (fw_is_ram(s->wake)) {
-		s->task = fw_task_create(scan_task, s, "sdmap", TASK_PRIORITY, TASK_STACK);
+		s->task = fw_task_create(scan_task, s, "blockmap", TASK_PRIORITY, TASK_STACK);
 		if (fw_is_ram(s->task))
 			return s;
 		fw_sem_delete(&s->wake);
@@ -284,7 +302,7 @@ static scan_t *start_scan(void *sd, uint32_t sectors)
 	return NULL;
 }
 
-static void open(lv_obj_t *return_focus)
+static void open_map(lv_obj_t *return_focus, bool flash)
 {
 	app_t *app = lv_mem_alloc(sizeof(app_t));
 	if (!app)
@@ -303,19 +321,25 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_set_pos(app->info, 2, (lv_coord_t)(h - 15));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	void *sd = FW_SD_NODE;
-	if (!fw_is_ram(sd)) {
-		lv_label_set_text(app->title, "No SD card");
-		return;
+	void *sd = NULL;
+	uint8_t shift = FLASH_SHIFT;
+	uint32_t blocks = FW_FLASH_SIZE / FW_FLASH_SECTOR;
+	if (!flash) {
+		sd = FW_SD_NODE;
+		if (!fw_is_ram(sd)) {
+			lv_label_set_text(app->title, "No SD card");
+			return;
+		}
+		shift = SD_SHIFT;
+		blocks = 0;
+		fw_sd_ioctl(FW_SD_SECTOR_COUNT, &blocks);
 	}
-	uint32_t sectors = 0;
-	fw_sd_ioctl(FW_SD_SECTOR_COUNT, &sectors);
-	app->pages = (sectors + PAGE - 1) / PAGE;
+	app->pages = (blocks + PAGE - 1) / PAGE;
 	if (!app->pages) {
 		lv_label_set_text(app->title, "SD card size unknown");
 		return;
 	}
-	app->scan = start_scan(sd, sectors);
+	app->scan = start_scan(sd, shift, blocks);
 	if (!app->scan) {
 		lv_label_set_text(app->title, "Out of memory");
 		return;
@@ -334,4 +358,15 @@ static void open(lv_obj_t *return_focus)
 	app->timer = lv_timer_create(tick, TICK_MS, app);
 }
 
-FW_MENU_ITEM(FW_SYMBOL_SAVE, "SD map", open);
+static void open_sd(lv_obj_t *return_focus)
+{
+	open_map(return_focus, false);
+}
+
+static void open_flash(lv_obj_t *return_focus)
+{
+	open_map(return_focus, true);
+}
+
+FW_MENU_ITEM(FW_SYMBOL_SAVE, "SD map", open_sd);
+FW_MENU_ITEM(FW_SYMBOL_SAVE, "Flash map", open_flash);

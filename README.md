@@ -12,7 +12,8 @@ What works so far, all tested on the device:
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
 - **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
   *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
-  oscilloscope view of the microphone), and *SD map* (the SD card's sectors colored by entropy).
+  oscilloscope view of the microphone), and *SD map* / *Flash map* (the SD card's or flash's
+  sectors colored by entropy).
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
   scripts.
@@ -53,7 +54,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/sdmap
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -80,7 +81,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/flutter`, `mp3tris`, `keytest`, `soundtest`, `micscope`, `sdmap` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -651,12 +652,15 @@ result. The media ioctl itself, `fw_sd_ioctl(cmd, &out)` (0x816778), answers Fat
 1 sector count, 2 sector size (512), 3 erase block size (1).
 
 **Don't read the card from the UI task either.** An early SD map read 16 sectors per 20 ms UI
-timer tick; it started drawing sectors, then rebooted the player after a couple of seconds. SD map now reads
-from its own task (priority 4, pausing 2 ms after each row of 16 sectors) and stores a color per
-sector; a UI timer draws them, and closing frees the state from a UI timer once the task is done,
-as with audio. Each sector's color is the Shannon entropy of its 512 bytes, computed with an
-integer log2. Random data comes
-out at about 7.6 bits per byte, the most 512 bytes can show.
+timer tick; it started drawing sectors, then rebooted the player after a couple of seconds.
+
+**SD map and Flash map** (`sdk/apps/blockmap`, two APP menu rows) now read from their own task
+(priority 4, pausing 2 ms after each row of 16 blocks) and store a color per block; a UI timer
+draws them, and closing frees the state from a UI timer once the task is done, as with audio.
+SD map reads 512-byte sectors; Flash map reads the memory-mapped flash (`FW_FLASH_BASE`) in
+4 KB erase sectors, two pages for the 2 MB chip. Each block's color is the Shannon entropy of
+its bytes, computed with an integer log2, from blue (0 bits per byte) to red (8). Random data
+comes out at about 7.6 in a 512-byte sector.
 
 ### Buttons and key events
 

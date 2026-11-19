@@ -273,6 +273,11 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 
 /* ---------------------------------------------------------------- vendor firmware */
 
+/* The 2 MB SPI flash, memory mapped: flash offset X is at FW_FLASH_BASE + X. */
+#define FW_FLASH_BASE 0x00C00000u
+#define FW_FLASH_SIZE 0x00200000u
+#define FW_FLASH_SECTOR 4096 /* erase unit */
+
 #define fw_log FW_FN(0x000002B0, int, (const char *fmt, ...)) /* boot ROM printf (debug UART) */
 #define get_lang_str FW_FN(0x00D01F8C, const char *, (int id))
 
