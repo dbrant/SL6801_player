@@ -80,7 +80,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `tools/avicheck.py` | Checks whether an `.avi` file meets the firmware video player's requirements |
 | `tools/find_lv_images.py`, `find_lv_fonts.py`, `render.py`, `findbase.py`, `survey.py` | Analysis helpers used while mapping the firmware (each takes the dump as first argument) |
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
-| `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
+| `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc and compiler helpers (ROM) |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
 | `sdk/apps/flutter`, `mp3tris`, `mandel`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
@@ -131,7 +131,10 @@ writes the partitions; `slfw.py <image> fixcrc <out>` recomputes the checksums.
 - Links one or more apps into one image. Their menu rows appear in the order the apps are given,
   e.g. `sdk/build.py sdk/apps/flutter sdk/apps/mp3tris` for just the two games.
 - Uses arm-none-eabi-gcc by default, or `zig cc` (from the `ziglang` pip package) with `--zig`.
-  Both produce working code (Thumb-2, Cortex-M4, soft-float ABI).
+  Both produce Thumb-2 code for the Cortex-M4F with the hard-float ABI, like the firmware's.
+- 64-bit division and most `double` helpers jump to the ROM (`sdk/src/aeabi.c`). With gcc,
+  libgcc supplies the rest (`double` comparisons, `double` to `int` and to `float`). zig links no
+  runtime library, so code that needs those doesn't link with `--zig`.
 - Each app directory's `*.c` files are compiled separately with the app's own include path. Each
   `assets/X.png` becomes a header `X.h` defining an `lv_img_dsc_t` named `img_X`, visible to that
   app only.
@@ -208,8 +211,10 @@ Rules and tips:
 - **Animation**: use `lv_timer_create` and `lv_tick_get`; see Flutter for a fixed-step loop that
   catches up when the timer fires late.
 - **Heavy computation**: run it in a task below the UI task's priority (3) that sleeps briefly
-  now and then, and draw its results from a UI timer; see Mandelbrot. No floating point is
-  linked, so use fixed point.
+  now and then, and draw its results from a UI timer; see Mandelbrot.
+- **Math**: `float` runs on the FPU (single precision). `double` is emulated in software and much
+  slower. `rom_sinf`, `rom_cosf`, `rom_log2f` and `rom_exp2f` are fast table lookups. Mandelbrot
+  uses 32-bit fixed point instead, which has more precision than `float` for deep zooms.
 - **Input**: see [Buttons and key events](#buttons-and-key-events). Center needs special handling
   because its `LV_EVENT_KEY` only arrives on release.
 - **Menu icons**: `FW_FONT_ICONS` has only these FontAwesome codepoints: F001 F008 F00C F013 F01D
@@ -379,13 +384,17 @@ is only used during boot.
 
 **Using it.**
 - `fw.h` binds the C library, `rom_tick_count` (FreeRTOS ticks at 1 kHz, i.e. milliseconds),
-  busy-wait delays, critical sections, clock gates and GPIO input.
-- The SDK's `memset`, `memcpy`, `memmove` and `strlen` forward to the ROM.
+  busy-wait delays, critical sections, clock gates, GPIO input, mono-to-stereo PCM expansion,
+  and the float approximations.
+- The SDK's `memset`, `memcpy`, `memmove` and `strlen` forward to the ROM, and so do the
+  compiler's 64-bit division and `double` helpers (`sdk/src/aeabi.c`).
+- The ROM's helpers match GCC 15's libgcc byte for byte, except that its `double` add/subtract
+  predates a libgcc fix for results at the edge of the denormal range.
 - All the names are in `ROM_FUNCTIONS` in `ghidra/scripts/SL6801Setup.java`.
 
-**FPU.** The CPU has a single-precision FPU (Cortex-M4F). The ROM's `xPortPendSVHandler` saves FPU
-registers, and both the ROM and the firmware are built hard-float. The SDK builds with
-`-mfloat-abi=soft`, so it can't call functions that take floats, such as `rom_sinf`.
+**FPU.** The CPU has a single-precision FPU (Cortex-M4F, FPv4-SP), and it is already enabled when
+apps run. The ROM's `xPortPendSVHandler` saves FPU registers on task switches. The ROM, the
+firmware and the SDK all use the hard-float ABI (float arguments in `s0`-`s15`).
 
 ### Software stack
 

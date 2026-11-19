@@ -273,8 +273,7 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 
 /* ---------------------------------------------------------------- boot ROM
  * The mask ROM at 0 holds the FreeRTOS kernel that the OS layer wraps, a C library, low-level
- * drivers, and audio and Bluetooth code (README, "Boot ROM"). Its float routines take arguments in
- * FPU registers, so they can't be called from this soft-float SDK. */
+ * drivers, and audio and Bluetooth code (README, "Boot ROM"). */
 #define fw_log FW_FN(0x000002B0, int, (const char *fmt, ...)) /* printf to the debug UART */
 #define rom_memcpy FW_FN(0x00000B2A, void *, (void *dst, const void *src, size_t n))
 #define rom_memset FW_FN(0x00000BAA, void *, (void *dst, int c, size_t n))
@@ -286,6 +285,15 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define rom_atoi FW_FN(0x00000D1E, int, (const char *s))
 #define rom_qsort \
 	FW_FN(0x00000C90, void, (void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)))
+/* Expands n mono samples to n stereo frames; dst may equal src. Copies words when both are 4-byte
+ * aligned and n is a multiple of 8. */
+#define rom_pcm_mono_to_stereo FW_FN(0x000013EA, void, (int16_t *dst, const int16_t *src, uint32_t n))
+/* Table lookups with linear interpolation. Worst errors: sinf/cosf 2e-5, log2f 3e-6, exp2f 1e-6
+ * relative. log2f needs a normal x > 0; exp2f gives 0 below -127 and FLT_MAX from 128. */
+#define rom_sinf FW_FN(0x00048488, float, (float x))
+#define rom_cosf FW_FN(0x0004840C, float, (float x))
+#define rom_log2f FW_FN(0x00048228, float, (float x))
+#define rom_exp2f FW_FN(0x00048268, float, (float x))
 /* FreeRTOS tick count. The tick is 1 kHz, so this is milliseconds since boot. Not for interrupts. */
 #define rom_tick_count FW_FN(0x0000A2B4, uint32_t, (void))
 /* Busy waits on the hardware timer; other tasks don't run meanwhile. */

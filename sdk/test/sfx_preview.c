@@ -11,8 +11,22 @@
 
 #include "sdk.h"
 
+/* The ROM routine the mixer calls, working from the end like the ROM's so it can run in place. */
+#undef rom_pcm_mono_to_stereo
+static void rom_pcm_mono_to_stereo(int16_t *dst, const int16_t *src, uint32_t n)
+{
+	while (n--)
+		dst[2 * n] = dst[2 * n + 1] = src[n];
+}
+
 /* Only sound.c's mixer is used here, not its device, task or heap calls. */
 #include "sound.c"
+
+bool fw_dev_busy(const char *name)
+{
+	(void)name;
+	return false;
+}
 
 #include "sfx.h"
 

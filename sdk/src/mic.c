@@ -88,11 +88,9 @@ uint32_t fw_mic_latest(fw_mic_t *m, int16_t *dst, uint32_t frames)
 	if (frames > total)
 		frames = total;
 	uint32_t pos = (total - frames) % FW_MIC_RING;
-	for (uint32_t i = 0; i < frames; i++) {
-		dst[2 * i] = m->ring[2 * pos];
-		dst[2 * i + 1] = m->ring[2 * pos + 1];
-		pos = (pos + 1) % FW_MIC_RING;
-	}
+	uint32_t first = frames < FW_MIC_RING - pos ? frames : FW_MIC_RING - pos;
+	memcpy(dst, &m->ring[2 * pos], first * 4);
+	memcpy(dst + 2 * first, m->ring, (frames - first) * 4);
 	return frames;
 }
 

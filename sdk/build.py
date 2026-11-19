@@ -25,8 +25,10 @@ GCC_BIN = os.environ.get("ARM_GCC_BIN", "C:/Tools/arm-gnu-toolchain/bin")
 COMMON = ["-mthumb", "-Os", "-std=c11", "-ffreestanding", "-fno-builtin", "-fno-stack-protector",
           "-g", "-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra",
           "-Werror=implicit-function-declaration"]
-GCC_FLAGS = ["-mcpu=cortex-m4", "-mfloat-abi=soft", "-fno-pic", "-fno-tree-loop-distribute-patterns", *COMMON]
-ZIG_FLAGS = ["-target", "thumb-freestanding-eabi", "-mcpu=cortex_m4", "-fno-pic", *COMMON]
+# The FPU is single precision (FPv4-SP); the firmware and ROM use the hard-float ABI too.
+GCC_FLAGS = ["-mcpu=cortex-m4", "-mfpu=fpv4-sp-d16", "-mfloat-abi=hard", "-fno-pic",
+             "-fno-tree-loop-distribute-patterns", *COMMON]
+ZIG_FLAGS = ["-target", "thumb-freestanding-eabihf", "-mcpu=cortex_m4+vfp4d16sp", "-fno-pic", *COMMON]
 ZIG = [sys.executable, "-m", "ziglang"]
 
 
@@ -51,7 +53,7 @@ def link(zig, objs, ld, out, roots):
     """Links objs; roots are the patch targets, kept by --gc-sections (the first is the entry)."""
     elf = os.path.join(out, "app.elf")
     binf = os.path.join(out, "app.bin")
-    keep = [f"-Wl,-e,{roots[0]}"] + [f"-Wl,--undefined={r}" for r in roots[1:]]
+    keep = [f"-Wl,-e,{roots[0]}"] + [f"-Wl,-u,{r}" for r in roots[1:]]
     if zig:
         run([*ZIG, "cc", *ZIG_FLAGS, *objs, "-nostdlib", "-static", "-Wl,--gc-sections", *keep,
              "-Wl,--no-dynamic-linker", "-Wl,-z,norelro", "-T", ld, "-o", elf])

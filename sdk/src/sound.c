@@ -52,7 +52,7 @@ struct fw_sound {
 	volatile uint8_t req_tail; /* written by the task */
 	uint32_t serial, lfsr;
 	voice_t voice[VOICES];
-	int16_t buf[PERIOD * 2];
+	int16_t buf[PERIOD * 2] __attribute__((aligned(4))); /* for the ROM's word copies */
 };
 
 static void start_tone(voice_t *v)
@@ -102,8 +102,8 @@ static int16_t clamp16(int32_t x)
 	return (int16_t)(x > 32767 ? 32767 : x < -32768 ? -32768 : x);
 }
 
-/* Starts queued sounds, then mixes all voices into the left channel of s->buf and copies it to
- * the right. */
+/* Starts queued sounds, mixes all voices into the first PERIOD samples of s->buf, then expands
+ * them to stereo in place. */
 static void render(fw_sound_t *s)
 {
 	take_requests(s);
@@ -147,11 +147,10 @@ static void render(fw_sound_t *s)
 				smp = (v->phase & 0x80000000u) ? (int32_t)env : -(int32_t)env;
 				break;
 			}
-			out[2 * i] = clamp16(out[2 * i] + smp);
+			out[i] = clamp16(out[i] + smp);
 		}
 	}
-	for (int i = 0; i < PERIOD; i++)
-		out[2 * i + 1] = out[2 * i];
+	rom_pcm_mono_to_stereo(out, out, PERIOD);
 }
 
 /* Plays the ring out, then closes the device. */
