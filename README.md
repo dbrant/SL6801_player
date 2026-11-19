@@ -13,8 +13,10 @@ What works so far, all tested on the device:
 - **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
   *Mandelbrot* (a fractal explorer), *FPU test* (rotating wireframes and an FPU task-switch
   check), *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
-  oscilloscope view of the microphone), and *SD map* / *Flash map* (the SD card's or flash's
-  sectors colored by entropy).
+  oscilloscope view of the microphone), *SD map* / *Flash map* (the SD card's or flash's
+  sectors colored by entropy), *Task monitor* (FreeRTOS tasks, CPU use and heap), *Benchmark*
+  (CPU clock, memory, flash and math speed), *Pin monitor* (live GPIO levels), and *Files* (an
+  SD card browser with a hex and text viewer).
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 firmware functions named automatically and 100 boot ROM
   functions named by hand, plus headless decompilation scripts.
@@ -35,8 +37,9 @@ built from it.
   [finding firmware functions](#finding-firmware-functions)
 - [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
   [flash layout](#flash-layout), [boot ROM](#boot-rom), [software stack](#software-stack),
-  [assets](#assets-inside-firm), [SDK internals](#sdk-internals), [audio](#audio), [recording](#recording),
-  [SD card](#sd-card), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
+  [assets](#assets-inside-firm), [SDK internals](#sdk-internals), [audio](#audio),
+  [recording](#recording), [SD card](#sd-card), [files](#files),
+  [diagnostic apps](#diagnostic-apps), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
   [Windows flashing setup](#windows-flashing-setup)
 - [Gotchas](#gotchas) and [open questions](#open-questions)
 
@@ -55,7 +58,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap sdk/apps/taskmon sdk/apps/bench sdk/apps/pinmon sdk/apps/files
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -83,7 +86,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc and compiler helpers (ROM) |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/flutter`, `mp3tris`, `mandel`, `fputest`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `mandel`, `fputest`, `keytest`, `soundtest`, `micscope`, `blockmap`, `taskmon`, `bench`, `pinmon`, `files` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -209,6 +212,11 @@ Rules and tips:
   are fine.
 - **Memory is tight.** The LVGL heap is 40 KB for the whole UI. Prefer a few objects; for many
   small elements draw into an indexed image instead (see Mp3tris).
+  - Put buffers of more than a few KB, such as image pixels, on the firmware heap
+    (`fw_os_calloc`), as Mandelbrot and Pin monitor do.
+  - A large `lv_mem_alloc` can fail when the UI heap is fragmented, and then the app silently
+    doesn't open. One that barely succeeds leaves the firmware's own UI short of memory, which
+    can crash it later.
 - **Animation**: use `lv_timer_create` and `lv_tick_get`; see Flutter for a fixed-step loop that
   catches up when the timer fires late.
 - **Heavy computation**: run it in a task below the UI task's priority (3) that sleeps briefly
@@ -240,6 +248,8 @@ Rules and tips:
   [Recording](#recording).
 - **SD card sectors**: `fw_dev_read(FW_SD_NODE, buf, count, &sector)`; see SD map and
   [SD card](#sd-card).
+- **Files**: `f_opendir`/`f_readdir` and `f_open`/`f_read`/`f_close` from a task, after checking
+  `fw_sd_mounted()`; see the Files app and [Files](#files).
 - **Host testing**: game logic can be compiled and run on the PC with MSYS2 gcc. `#undef` the
   `fw.h` macros the app uses, define stubs, then `#include "main.c"`.
   `sdk/apps/mp3tris/test/host_test.c` drives the game with fake events and ticks, and `show.py`
@@ -741,6 +751,91 @@ SD map reads 512-byte sectors; Flash map reads the memory-mapped flash (`FW_FLAS
 its bytes, computed with an integer log2, from blue (0 bits per byte) to red (8). Random data
 comes out at about 7.6 in a 512-byte sector.
 
+### Files
+
+The firmware's FatFs is R0.14b-style. `fw.h` binds its API, with the structures as opaque
+buffers of the right size (`fw_file_t` 600 bytes, `fw_dir_t` 88, and `fw_fileinfo_t` 288 with
+its fields).
+
+| Function | Address | Function | Address |
+|---|---|---|---|
+| `f_open` | 0xD58890 | `f_opendir` | 0xD58086 |
+| `f_close` | 0xD58D60 | `f_readdir` | 0xD58190 |
+| `f_read` | 0xD57918 | `f_closedir` | 0xD58162 |
+| `f_write` | 0xD57AD6 | `f_stat` | 0xD5825E |
+| `f_lseek` (64-bit offset) | 0xD57CCE | `f_getfree` | 0xD582CC |
+| `f_sync` | 0xD58BB4 | `f_unlink`, `f_rename`, `f_mkdir` | 0xD583EA, 0xD584F4, 0xD58D92 |
+
+Also present: `f_mount` 0xD57888 (only `sdmmc_wrap_init`/`deinit` call it), `f_findfirst`
+0xD58240, `f_findnext` 0xD58210 and `f_mkfs` 0xD58F38. Not linked: `f_chdir`, `f_gets`,
+`f_printf`, `f_truncate`, `f_utime`. There is no file layer above FatFs worth using.
+
+**Configuration.**
+- Long names are allowed, with a 0x460-byte working buffer from the firmware heap per path call
+  (`FF_USE_LFN` 3).
+- Strings are UTF-8 (`FF_LFN_UNICODE` 2). 8.3 names use code page 932.
+- exFAT, fast seek and `f_findfirst` are enabled.
+- Volumes `"0:"` and `"1:"` are the first two partitions of the card, and the drive prefix is
+  optional. `/` and `\` both separate folders.
+- There is no current directory.
+- Up to 20 files and folders can be open at once (`FF_FS_LOCK`), shared with the firmware.
+- `FILINFO` holds a 64-bit size, date, time, attributes, an 8.3 name and a 256-byte name.
+- Result codes and mode flags are standard FatFs.
+
+**Locking.** Each volume has a FreeRTOS mutex (`FF_FS_REENTRANT`), so calls are safe from any
+task. Still, never call them from the UI task (see above).
+
+**Mounting.**
+- `watch_sdcard_init` (0xD26CB8) mounts the card at startup, on insertion and on wake.
+- `watch_sdcard_deinit` unmounts it on removal, in USB card-reader mode and on sleep. It frees
+  the `FATFS` without waiting for other users of the card.
+- Calls on an unmounted card return `FR_NOT_ENABLED` (12).
+- If mounting fails, the firmware frees the `FATFS` but leaves its pointer behind. So before
+  touching the card, check `fw_sd_mounted()`: the drive table's mounted flag (0x81A7D4) and
+  `FatFs[0]` (0x81DC80) must both be set.
+- Keep files open only briefly.
+
+**Heap.** Each path call and `f_readdir` takes 0x460 bytes through the firmware's `oal_malloc`.
+When that fails, it returns `printf`'s result instead of NULL, and FatFs then writes through the
+bad pointer, which crashes the player. So make sure the firmware heap has room before calling.
+
+**Files** (`sdk/apps/files`) browses the card and shows files in hex or as text.
+- A task makes all the FatFs calls. The UI posts a request (list a folder, or read 512 bytes at
+  an offset) and polls for the result.
+- Each read opens, seeks, reads and closes the file, so nothing stays open.
+- The task skips a request ("Low memory") when the firmware heap has less than 8 KB free.
+- Folders are listed into a 12 KB name pool (up to 400 entries) and sorted with `rom_qsort`,
+  folders first.
+
+### Diagnostic apps
+
+**Task monitor** (`sdk/apps/taskmon`) lists the FreeRTOS tasks once a second through
+`rom_task_states` (the ROM's `uxTaskGetSystemState`).
+- **Task data:** each `fw_task_status_t` holds the name, number, state, current and base
+  priority, run time and lowest free stack (in words). The kernel has 20 priority levels.
+- **CPU use:** run-time stats are on, counted by the low 32 bits of the hardware timer at
+  0x40082104. A task's CPU use is its run time since the last snapshot over the total. "Busy" is
+  100% minus the `IDLE` task's share.
+- **Heap:** heap_4 keeps its size, free bytes and minimum free bytes at 0x800C74, 0x800C64 and
+  0x800C68 (`FW_HEAP_SIZE`, `FW_HEAP_FREE`, `FW_HEAP_MIN_FREE`). `rom_heap_init` (0x9D28) sets
+  them up.
+
+**Benchmark** (`sdk/apps/bench`) times, on the ROM's hardware timer from a task below the UI's
+priority:
+- the CPU clock, from the DWT cycle counter, or from the SysTick reload at 1 kHz if the counter
+  doesn't run;
+- `memcpy`, a byte loop and `memset` over 8 KB buffers;
+- `memcpy` from memory-mapped flash (512 KB of FIRM);
+- float fused multiply-adds, software `double`, `rom_sinf`, and 64-bit division.
+
+**Pin monitor** (`sdk/apps/pinmon`) polls all 128 GPIO pins 50 times a second with
+`rom_gpio_get`, and highlights pins as they change.
+- The ROM's pin table at 0x9B4 puts the 4 ports at 0x40081000 + 0x40 × port, with the input
+  levels at +0x10.
+- A pin is `port << 16 | pin << 11`; the low bits configure it in `rom_pin_config`.
+- Of the buttons, only Center (the power key) changes a GPIO pin. The others don't show up, so
+  they must be read another way, most likely through the ADC (`/dev/kadc_ch1`).
+
 ### Buttons and key events
 
 The keypad driver's read callback (`FUN_00D02018`) turns the key manager's (key id, event)
@@ -800,8 +895,8 @@ game. In Mp3tris, a Center press drops the piece one row, and a press on a lande
 it. Center sends no repeat codes, so holding it (`FW_KEY_CENTER_LONG`, sent once) drops the piece
 to the bottom and locks it.
 
-Mandelbrot also exits on a held Back and uses a short Back as "down", since Back is the bottom
-button and the player has no Down key. Center zooms in on its release (`FW_KEY_CENTER`), and
+Mandelbrot and Pin monitor exit on a held Back and use a short Back as "down", since Back is
+the bottom button and the player has no Down key. Center zooms in on its release (`FW_KEY_CENTER`), and
 holding it zooms out (`FW_KEY_CENTER_LONG`): a long press sends no release code, so the two
 never both fire.
 
@@ -850,6 +945,10 @@ and 0xA3 and record code 0x92 from the table above.
 - **No writable globals in apps** (see [Writing a new app](#writing-a-new-app)).
 - **Center's KEY event comes on release**; use `LV_EVENT_PRESSED` for responsiveness.
 - **`LV_EVENT_DELETE` is 33** in this build (not 34).
+- **`fw_task_create`'s stack size is in words** (it goes straight to `xTaskCreate`), taken from
+  the firmware heap. The apps use 0x400 (4 KB) and count it when checking for free heap.
+- **Keep the firmware heap from running out.** Its `oal_malloc` returns `printf`'s result
+  instead of NULL on failure, and callers such as FatFs then write through that bad pointer.
 - **Images resized by `pack`** may be cropped or misplaced if the UI code hardcodes the original size.
 - **`slfw.Image` copies its input buffer**; code that edits an image must write to `img.data`.
 
@@ -861,7 +960,8 @@ and 0xA3 and record code 0x92 from the table above.
   non-zero).
 - Most of the ROM's audio and Bluetooth functions are still unnamed.
 - Somewhere persistent to store app data (e.g. high scores) without globals: a free field in the
-  `PSMP` settings or a spare pointer in the firmware's RAM.
+  `PSMP` settings, a spare pointer in the firmware's RAM, or a file on the SD card (`f_write` is
+  bound but not tried yet).
 
 ## License
 
