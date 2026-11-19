@@ -296,6 +296,9 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define rom_exp2f FW_FN(0x00048268, float, (float x))
 /* FreeRTOS tick count. The tick is 1 kHz, so this is milliseconds since boot. Not for interrupts. */
 #define rom_tick_count FW_FN(0x0000A2B4, uint32_t, (void))
+/* The free-running 64-bit hardware timer behind the delays, and its rate in Hz. */
+#define rom_timer_read64 FW_FN(0x0000B6D8, uint64_t, (void))
+#define FW_TIMER_HZ (*(volatile const uint32_t *)0x00801374u)
 /* Busy waits on the hardware timer; other tasks don't run meanwhile. */
 #define rom_delay_us FW_FN(0x0000B73E, void, (uint32_t us))
 #define rom_delay_ms FW_FN(0x0000B764, void, (uint32_t ms))

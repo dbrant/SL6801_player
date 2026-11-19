@@ -11,7 +11,8 @@ What works so far, all tested on the device:
 - **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
 - **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
-  *Mandelbrot* (a fractal explorer), *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
+  *Mandelbrot* (a fractal explorer), *FPU test* (rotating wireframes and an FPU task-switch
+  check), *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
   oscilloscope view of the microphone), and *SD map* / *Flash map* (the SD card's or flash's
   sectors colored by entropy).
 - **Flashing from Windows** over USB with `smtlink_dump`.
@@ -54,7 +55,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -82,7 +83,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc and compiler helpers (ROM) |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/flutter`, `mp3tris`, `mandel`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `mandel`, `fputest`, `keytest`, `soundtest`, `micscope`, `blockmap` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -213,8 +214,11 @@ Rules and tips:
 - **Heavy computation**: run it in a task below the UI task's priority (3) that sleeps briefly
   now and then, and draw its results from a UI timer; see Mandelbrot.
 - **Math**: `float` runs on the FPU (single precision). `double` is emulated in software and much
-  slower. `rom_sinf`, `rom_cosf`, `rom_log2f` and `rom_exp2f` are fast table lookups. Mandelbrot
-  uses 32-bit fixed point instead, which has more precision than `float` for deep zooms.
+  slower. `rom_sinf`, `rom_cosf`, `rom_log2f` and `rom_exp2f` are fast table lookups; see FPU
+  test. Mandelbrot uses 32-bit fixed point instead, which has more precision than `float` for
+  deep zooms.
+- **Timing**: `rom_timer_read64()` counts at `FW_TIMER_HZ`, for measuring code to the
+  microsecond (FPU test shows its frame time this way).
 - **Input**: see [Buttons and key events](#buttons-and-key-events). Center needs special handling
   because its `LV_EVENT_KEY` only arrives on release.
 - **Menu icons**: `FW_FONT_ICONS` has only these FontAwesome codepoints: F001 F008 F00C F013 F01D
