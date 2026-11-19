@@ -115,6 +115,7 @@ typedef void (*lv_event_cb_t)(lv_event_t *e);
 
 #define LV_LABEL_LONG_WRAP 0
 #define LV_TEXT_ALIGN_CENTER 2
+#define LV_TEXT_ALIGN_RIGHT 3
 
 #define LV_OBJ_FLAG_HIDDEN (1u << 0)
 #define LV_OBJ_FLAG_CLICKABLE (1u << 1)
@@ -240,6 +241,67 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
 #define FW_SD_SECTOR_COUNT 1
 #define FW_SD_SECTOR_SIZE 512
 
+/* ---------------------------------------------------------------- files (FatFs R0.14b)
+ * Long names as UTF-8, exFAT. "0:" is the SD card ("0:/dir/file"; '\' works too, and the drive
+ * is optional). Each call locks the volume with a mutex, so calls are safe from any task, but
+ * not from the UI task (see /dev/sd). The firmware mounts the card on insertion and unmounts it,
+ * freeing its state without waiting for other users, on removal, USB card-reader mode and sleep.
+ * So check fw_sd_mounted() before a batch of calls, keep files open only briefly, and treat
+ * FR_NOT_ENABLED and FR_INVALID_OBJECT as "card gone". Up to 20 files and directories can be
+ * open at once, shared with the firmware. Path calls and f_readdir take 0x460 bytes of firmware
+ * heap through oal_malloc, which on failure returns printf's result instead of NULL, so FatFs
+ * then writes through a bad pointer: make sure the heap has room (FW_HEAP_FREE) first. */
+enum {
+	FR_OK = 0,
+	FR_DISK_ERR = 1,
+	FR_NO_FILE = 4,
+	FR_NO_PATH = 5,
+	FR_INVALID_OBJECT = 9,
+	FR_NOT_ENABLED = 12,
+	FR_NO_FILESYSTEM = 13,
+	FR_NOT_ENOUGH_CORE = 17,
+};
+#define FA_READ 0x01
+#define FA_WRITE 0x02
+#define FA_CREATE_NEW 0x04
+#define FA_CREATE_ALWAYS 0x08
+#define FA_OPEN_ALWAYS 0x10
+#define AM_RDO 0x01
+#define AM_HID 0x02
+#define AM_SYS 0x04
+#define AM_DIR 0x10
+#define AM_ARC 0x20
+typedef struct {
+	uint64_t opaque[600 / 8];
+} fw_file_t; /* FIL */
+typedef struct {
+	uint64_t opaque[88 / 8];
+} fw_dir_t; /* DIR */
+typedef struct {
+	uint64_t size;
+	uint16_t date, time; /* FAT format */
+	uint8_t attrib;      /* AM_* */
+	char altname[13];    /* 8.3 name; empty on exFAT */
+	char name[256];      /* UTF-8; empty at the end of a directory */
+} fw_fileinfo_t;         /* FILINFO, 0x120 bytes */
+#define fw_file_size(fp) (*(const uint64_t *)((const uint8_t *)(fp) + 0x10))
+/* The card is mounted: the drive table's flag and FatFs[0] are both set. */
+#define fw_sd_mounted() (*(volatile const uint8_t *)0x0081A7D4u && *(void *volatile const *)0x0081DC80u)
+#define f_open FW_FN(0x00D58890, int, (fw_file_t * fp, const char *path, uint8_t mode))
+#define f_close FW_FN(0x00D58D60, int, (fw_file_t * fp))
+#define f_read FW_FN(0x00D57918, int, (fw_file_t * fp, void *buf, uint32_t n, uint32_t *done))
+#define f_write FW_FN(0x00D57AD6, int, (fw_file_t * fp, const void *buf, uint32_t n, uint32_t *done))
+#define f_lseek FW_FN(0x00D57CCE, int, (fw_file_t * fp, uint64_t ofs))
+#define f_sync FW_FN(0x00D58BB4, int, (fw_file_t * fp))
+#define f_opendir FW_FN(0x00D58086, int, (fw_dir_t * dp, const char *path))
+#define f_readdir FW_FN(0x00D58190, int, (fw_dir_t * dp, fw_fileinfo_t *fno))
+#define f_closedir FW_FN(0x00D58162, int, (fw_dir_t * dp))
+#define f_stat FW_FN(0x00D5825E, int, (const char *path, fw_fileinfo_t *fno))
+#define f_getfree FW_FN(0x00D582CC, int, (const char *path, uint32_t *free_clusters, void **fs))
+#define f_unlink FW_FN(0x00D583EA, int, (const char *path))
+#define f_rename FW_FN(0x00D584F4, int, (const char *old_path, const char *new_path))
+#define f_mkdir FW_FN(0x00D58D92, int, (const char *path))
+
 /* Playback DMA state of the audio hardware, read by its interrupt (0x8167E8). In state PLAYING the
  * interrupt starts the next period from the ring, even after the device has been closed and the
  * ring freed, so close /dev/audio0 only once the ring has run dry (state STARVED). */
@@ -255,7 +317,8 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define fw_os_free FW_FN(0x00CD8654, void, (void *p))
 #define fw_os_heap_free FW_FN(0x00CD8660, uint32_t, (void))
 #define fw_os_sleep FW_FN(0x00CD86B4, void, (uint32_t ms))
-/* entry(arg) runs in a new task; fw_task_join waits for entry to return, then deletes the task. */
+/* entry(arg) runs in a new task; fw_task_join waits for entry to return, then deletes the task.
+ * The stack size is in 4-byte words and comes from the firmware heap. */
 #define fw_task_create \
 	FW_FN(0x00CD88A4, void *, (void (*entry)(void *), void *arg, const char *name, int priority, uint32_t stack))
 #define fw_task_join FW_FN(0x00CD8960, void, (void *task))
@@ -296,6 +359,25 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define rom_exp2f FW_FN(0x00048268, float, (float x))
 /* FreeRTOS tick count. The tick is 1 kHz, so this is milliseconds since boot. Not for interrupts. */
 #define rom_tick_count FW_FN(0x0000A2B4, uint32_t, (void))
+/* FreeRTOS TaskStatus_t as this kernel fills it. Run times count FW_TIMER_HZ ticks (32 bits). */
+enum { FW_TASK_READY = 1, FW_TASK_BLOCKED, FW_TASK_SUSPENDED, FW_TASK_DELETED };
+typedef struct {
+	void *handle;
+	const char *name; /* inside the task's control block */
+	uint32_t number;
+	uint8_t state;
+	uint32_t priority, base_priority;
+	uint32_t run_time;
+	uint16_t stack_free; /* lowest free stack so far, in words */
+} fw_task_status_t;
+/* uxTaskGetSystemState: fills up to max entries (0 if there are more tasks than that) and the
+ * total run time; the scheduler is suspended meanwhile. */
+#define rom_task_states FW_FN(0x0000A564, uint32_t, (fw_task_status_t * out, uint32_t max, uint32_t *total))
+#define rom_task_count FW_FN(0x0000A2CC, uint32_t, (void))
+/* FreeRTOS heap (heap_4): its size, free bytes now and the lowest free bytes so far. */
+#define FW_HEAP_SIZE (*(volatile const uint32_t *)0x00800C74u)
+#define FW_HEAP_FREE (*(volatile const uint32_t *)0x00800C64u)
+#define FW_HEAP_MIN_FREE (*(volatile const uint32_t *)0x00800C68u)
 /* The free-running 64-bit hardware timer behind the delays, and its rate in Hz. */
 #define rom_timer_read64 FW_FN(0x0000B6D8, uint64_t, (void))
 #define FW_TIMER_HZ (*(volatile const uint32_t *)0x00801374u)
