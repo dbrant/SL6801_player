@@ -706,3 +706,7 @@ and 0xA3 and record code 0x92 from the table above.
 - A boot ROM dump, to name the ROM functions the app calls.
 - Somewhere persistent to store app data (e.g. high scores) without globals: a free field in the
   `PSMP` settings or a spare pointer in the firmware's RAM.
+
+## License
+
+MIT
