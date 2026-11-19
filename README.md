@@ -11,8 +11,8 @@ What works so far, all tested on the device:
 - **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
 - **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
-  *Key test* (shows key codes), *Sound test* (exercises audio functions), and *Mic scope* (an
-  oscilloscope view of the microphone).
+  *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
+  oscilloscope view of the microphone), and *SD map* (the SD card's sectors colored by entropy).
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
   scripts.
@@ -34,7 +34,7 @@ built from it.
 - [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
   [flash layout](#flash-layout), [software stack](#software-stack), [assets](#assets-inside-firm),
   [SDK internals](#sdk-internals), [audio](#audio), [recording](#recording),
-  [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
+  [SD card](#sd-card), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
   [Windows flashing setup](#windows-flashing-setup)
 - [Gotchas](#gotchas) and [open questions](#open-questions)
 
@@ -53,7 +53,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/sdmap
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -80,7 +80,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/flutter`, `mp3tris`, `keytest`, `soundtest`, `micscope` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `keytest`, `soundtest`, `micscope`, `sdmap` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -224,6 +224,8 @@ Rules and tips:
 - **Microphone**: `fw_mic_open()` when the app opens, `fw_mic_latest(mic, buf, frames)` from a
   timer to get the newest stereo samples, `fw_mic_close()` in `on_delete`. See Mic scope and
   [Recording](#recording).
+- **SD card sectors**: `fw_dev_read(FW_SD_NODE, buf, count, &sector)`; see SD map and
+  [SD card](#sd-card).
 - **Host testing**: game logic can be compiled and run on the PC with MSYS2 gcc. `#undef` the
   `fw.h` macros the app uses, define stubs, then `#include "main.c"`.
   `sdk/apps/mp3tris/test/host_test.c` drives the game with fake events and ticks, and `show.py`
@@ -628,6 +630,33 @@ The firmware's sources:
 microphone is on the right channel; the left one stays silent. A task owns the device and
 reads one period at a time into a ring of 1024 frames; `fw_mic_latest` copies the newest frames
 out; `fw_mic_close` stops the task and frees the state from a UI timer, like the sound module.
+
+### SD card
+
+**`/dev/sd`** (probe 0xD46D58, descriptor at 0xCB5038) has driver functions read 0x813390 and
+write 0x813362 (both in RAM), ioctl 0xD46EB4, open 0xD46DA4 and close 0xD46D90.
+
+FatFs's disk functions (0xD59E64-0xD59F4E) use it:
+- `sdmmc_wrap_init` (0xD59CDC) opens `/dev/sd` for a drive and mounts it. A table of 13-byte
+  entries at 0x81A7CC holds each drive's node, `FATFS` object, mounted flag and device name. All
+  disk calls use drive 0's node, `FW_SD_NODE`.
+- `disk_read` is `fw_dev_read(node, buf, count, &sector)` and `disk_write` the same with
+  `fw_dev_write`: the last argument points to the first sector's number (32 bits). Both return
+  `count` on success and 0 on error.
+- The read goes through `FUN_00816538(card, buf, sector, count)`. It holds the card's mutex,
+  reads one 512-byte sector at a time, and uses a bounce buffer for unaligned `buf`.
+
+The device ioctl doesn't return the card's size: command 1 calls the media ioctl but drops its
+result. The media ioctl itself, `fw_sd_ioctl(cmd, &out)` (0x816778), answers FatFs's commands:
+1 sector count, 2 sector size (512), 3 erase block size (1).
+
+**Don't read the card from the UI task either.** An early SD map read 16 sectors per 20 ms UI
+timer tick; it started drawing sectors, then rebooted the player after a couple of seconds. SD map now reads
+from its own task (priority 4, pausing 2 ms after each row of 16 sectors) and stores a color per
+sector; a UI timer draws them, and closing frees the state from a UI timer once the task is done,
+as with audio. Each sector's color is the Shannon entropy of its 512 bytes, computed with an
+integer log2. Random data comes
+out at about 7.6 bits per byte, the most 512 bytes can show.
 
 ### Buttons and key events
 

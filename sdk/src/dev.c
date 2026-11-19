@@ -1,3 +1,8 @@
+/*
+ * Device helpers shared by the SDK modules.
+ *
+ * Dmitry Brant, 2026
+ */
 #include "sdk.h"
 
 static bool str_eq(const char *a, const char *b)

@@ -2,6 +2,8 @@
  * "Mic scope" entry in the APP menu: an oscilloscope view of the microphone input, the left
  * channel on top and the right one below, triggered on a rising zero crossing.
  * Up changes the gain, Left/Right the time scale, Center freezes the view, Back exits.
+ *
+ * Dmitry Brant, 2026
  */
 #include "sdk.h"
 

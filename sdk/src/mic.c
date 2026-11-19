@@ -4,6 +4,8 @@
  * As with the sound module, a task owns the device from open to close (reads block until a
  * period is in). fw_mic_close only signals the task; a UI timer joins it once it is done and
  * frees the state, which lives on the firmware heap.
+ *
+ * Dmitry Brant, 2026
  */
 #include "sdk.h"
 

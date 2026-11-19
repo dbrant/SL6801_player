@@ -26,6 +26,7 @@ typedef struct {
 #define FW_SYMBOL_OK "\xEF\x80\x8C"    /* U+F00C */
 #define FW_SYMBOL_AUDIO "\xEF\x80\x81" /* U+F001 */
 #define FW_SYMBOL_BARS "\xEF\x83\x89"  /* U+F0C9 */
+#define FW_SYMBOL_SAVE "\xEF\x83\x87"  /* U+F0C7 */
 
 /* ---------------------------------------------------------------- full-screen overlays
  * A full-screen object on the top layer that takes all key input until it is deleted.
