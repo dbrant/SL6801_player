@@ -10,13 +10,19 @@ What works so far, all tested on the device:
   all checksums fixed. Edited data goes to free flash.
 - **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
-- **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
-  *Mandelbrot* (a fractal explorer), *FPU test* (rotating wireframes and an FPU task-switch
-  check), *Key test* (shows key codes), *Sound test* (exercises audio functions), *Mic scope* (an
-  oscilloscope view of the microphone), *SD map* / *Flash map* (the SD card's or flash's
-  sectors colored by entropy), *Task monitor* (FreeRTOS tasks, CPU use and heap), *Benchmark*
-  (CPU clock, memory, flash and math speed), *Pin monitor* (live GPIO levels), and *Files* (an
-  SD card browser with a hex and text viewer).
+- **Apps**!
+  - *Flutter*: a side-scrolling Flappy Bird style game.
+  - *Mp3tris*: a Tetris clone.
+  - *Mandelbrot*: a fractal explorer.
+  - *FPU test*: rotating wireframes and an FPU task-switch check.
+  - *Key test*: shows key codes.
+  - *Sound test*: exercises audio functions.
+  - *Mic scope*: an oscilloscope view of the microphone.
+  - *SD map* / *Flash map*: the SD card's or flash's sectors colored by entropy.
+  - *Task monitor*: FreeRTOS tasks, CPU use and heap.
+  - *Benchmark*: CPU clock, memory, flash and math speed.
+  - *Pin monitor*: live GPIO levels.
+  - *Files*: an SD card browser with a hex and text viewer.
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 firmware functions named automatically and 100 boot ROM
   functions named by hand, plus headless decompilation scripts.
