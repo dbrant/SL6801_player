@@ -34,7 +34,7 @@
 #define TICK_MS 33
 #define STATS_TICKS 15
 #define CHECK_PRIORITY 2
-#define CHECK_STACK 0x800
+#define CHECK_STACK 0x400 /* words */
 #define CHECK_ITERS 2000 /* about 1-2 ms per run, so ticks and the UI task interrupt it */
 #define CHECK_PAUSE_MS 2
 #define REAP_MS 20

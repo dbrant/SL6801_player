@@ -25,7 +25,7 @@
 #define FLASH_SHIFT 12 /* FW_FLASH_SECTOR */
 #define TICK_MS 30
 #define TASK_PRIORITY 4
-#define TASK_STACK 0x800
+#define TASK_STACK 0x400 /* words */
 #define ROW_PAUSE_MS 2 /* the task pauses after each row, so the UI keeps running */
 #define HEAP_RESERVE 0x8000
 #define REAP_MS 20
@@ -282,7 +282,7 @@ static void key_cb(lv_event_t *e)
 /* Allocates the shared state and starts the reader task; NULL on failure. */
 static scan_t *start_scan(void *sd, uint8_t shift, uint32_t blocks)
 {
-	if (fw_os_heap_free() < sizeof(scan_t) + HEAP_RESERVE)
+	if (fw_os_heap_free() < sizeof(scan_t) + TASK_STACK * 4 + HEAP_RESERVE)
 		return NULL;
 	scan_t *s = fw_os_calloc(1, sizeof(scan_t));
 	if (!fw_is_ram(s))

@@ -13,7 +13,7 @@
 #define PERIOD 128 /* frames per read; FW_MIC_RING is a multiple of it */
 #define SOURCE 7
 #define TASK_PRIORITY 6
-#define TASK_STACK 0x800
+#define TASK_STACK 0x400 /* words */
 #define HEAP_RESERVE 0x8000
 #define REAP_MS 20
 
@@ -56,7 +56,7 @@ static void release(fw_mic_t *m)
 
 fw_mic_t *fw_mic_open(void)
 {
-	if (fw_dev_busy(MIC_DEV) || fw_os_heap_free() < sizeof(fw_mic_t) + HEAP_RESERVE)
+	if (fw_dev_busy(MIC_DEV) || fw_os_heap_free() < sizeof(fw_mic_t) + TASK_STACK * 4 + HEAP_RESERVE)
 		return NULL;
 	fw_mic_t *m = fw_os_calloc(1, sizeof(*m));
 	if (!fw_is_ram(m))

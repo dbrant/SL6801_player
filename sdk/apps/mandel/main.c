@@ -32,7 +32,7 @@
 #define CYCLE_STEP 8 /* palette steps per iteration: a full cycle every 32 iterations */
 #define TICK_MS 50
 #define TASK_PRIORITY 2
-#define TASK_STACK 0x800
+#define TASK_STACK 0x400 /* words */
 #define ROW_PAUSE_MS 1
 #define HEAP_RESERVE 0x8000
 #define REAP_MS 20
@@ -253,7 +253,7 @@ static void key_cb(lv_event_t *e)
 /* Allocates the shared state and starts the render task; NULL on failure. */
 static render_t *start_render(void)
 {
-	if (fw_os_heap_free() < sizeof(render_t) + HEAP_RESERVE)
+	if (fw_os_heap_free() < sizeof(render_t) + TASK_STACK * 4 + HEAP_RESERVE)
 		return NULL;
 	render_t *r = fw_os_calloc(1, sizeof(render_t));
 	if (!fw_is_ram(r))

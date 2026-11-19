@@ -16,7 +16,7 @@
 #define PERIOD 256          /* frames per write */
 #define PERIODS 8           /* ring size: about 46 ms */
 #define TASK_PRIORITY 6     /* same as the video player's audio task */
-#define TASK_STACK 0x800
+#define TASK_STACK 0x400 /* words */
 #define VOICES 4
 #define REQUESTS 8          /* power of two */
 #define INC_PER_HZ 97392u   /* phase increment for 1 Hz: 2^32 / 44100 */
@@ -199,7 +199,7 @@ static void release(fw_sound_t *s)
 
 fw_sound_t *fw_sound_open(void)
 {
-	if (fw_dev_busy(AUDIO_DEV) || fw_os_heap_free() < sizeof(fw_sound_t) + HEAP_RESERVE)
+	if (fw_dev_busy(AUDIO_DEV) || fw_os_heap_free() < sizeof(fw_sound_t) + TASK_STACK * 4 + HEAP_RESERVE)
 		return NULL;
 	fw_sound_t *s = fw_os_calloc(1, sizeof(*s));
 	if (!fw_is_ram(s))
