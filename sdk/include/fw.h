@@ -271,6 +271,40 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define fw_gain_apply FW_FN(0x00D47C10, void, (void *gain, uint32_t volume, void *buf, uint32_t frames))
 #define fw_gain_free FW_FN(0x00D47CB8, void, (void *gain))
 
+/* ---------------------------------------------------------------- boot ROM
+ * The mask ROM at 0 holds the FreeRTOS kernel that the OS layer wraps, a C library, low-level
+ * drivers, and audio and Bluetooth code (README, "Boot ROM"). Its float routines take arguments in
+ * FPU registers, so they can't be called from this soft-float SDK. */
+#define fw_log FW_FN(0x000002B0, int, (const char *fmt, ...)) /* printf to the debug UART */
+#define rom_memcpy FW_FN(0x00000B2A, void *, (void *dst, const void *src, size_t n))
+#define rom_memset FW_FN(0x00000BAA, void *, (void *dst, int c, size_t n))
+#define rom_memmove FW_FN(0x00000C1E, void *, (void *dst, const void *src, size_t n))
+#define rom_memcmp FW_FN(0x00000C54, int, (const void *a, const void *b, size_t n))
+#define rom_strlen FW_FN(0x00000AA2, size_t, (const char *s))
+#define rom_strcmp FW_FN(0x00000AB2, int, (const char *a, const char *b))
+#define rom_strcpy FW_FN(0x00000A32, char *, (char *dst, const char *src))
+#define rom_atoi FW_FN(0x00000D1E, int, (const char *s))
+#define rom_qsort \
+	FW_FN(0x00000C90, void, (void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)))
+/* FreeRTOS tick count. The tick is 1 kHz, so this is milliseconds since boot. Not for interrupts. */
+#define rom_tick_count FW_FN(0x0000A2B4, uint32_t, (void))
+/* Busy waits on the hardware timer; other tasks don't run meanwhile. */
+#define rom_delay_us FW_FN(0x0000B73E, void, (uint32_t us))
+#define rom_delay_ms FW_FN(0x0000B764, void, (uint32_t ms))
+/* FreeRTOS critical section (masks interrupts at BASEPRI 0x50 and up) and scheduler suspension;
+ * both nest. */
+#define rom_enter_critical FW_FN(0x0000B514, void, (void))
+#define rom_exit_critical FW_FN(0x0000B534, void, (void))
+#define rom_suspend_all FW_FN(0x0000A2A4, void, (void))
+#define rom_resume_all FW_FN(0x0000A428, int, (void))
+/* Peripheral clock gates, numbered 0-95 across three 32-bit registers. */
+#define rom_clk_enable FW_FN(0x00002564, void, (uint32_t id))
+#define rom_clk_disable FW_FN(0x00002570, void, (uint32_t id))
+#define rom_clk_is_enabled FW_FN(0x00002518, bool, (uint32_t id))
+/* Input level of a GPIO pin, given as port << 16 | pin << 11 (the ROM reads 0x30000 for the boot
+ * key). */
+#define rom_gpio_get FW_FN(0x000007EC, bool, (uint32_t pin))
+
 /* ---------------------------------------------------------------- vendor firmware */
 
 /* The 2 MB SPI flash, memory mapped: flash offset X is at FW_FLASH_BASE + X. */
@@ -278,7 +312,6 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define FW_FLASH_SIZE 0x00200000u
 #define FW_FLASH_SECTOR 4096 /* erase unit */
 
-#define fw_log FW_FN(0x000002B0, int, (const char *fmt, ...)) /* boot ROM printf (debug UART) */
 #define get_lang_str FW_FN(0x00D01F8C, const char *, (int id))
 
 /* The UI's 12 px, 1 bpp multilingual font (lv_font_t in .data). */

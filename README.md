@@ -15,8 +15,8 @@ What works so far, all tested on the device:
   oscilloscope view of the microphone), and *SD map* / *Flash map* (the SD card's or flash's
   sectors colored by entropy).
 - **Flashing from Windows** over USB with `smtlink_dump`.
-- **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
-  scripts.
+- **Ghidra** project setup with ~350 firmware functions named automatically and 100 boot ROM
+  functions named by hand, plus headless decompilation scripts.
 
 This repo depends on the original firmware being dumped in the current directory, and called
 `firmware_2M.bin`. Please dump the firmware on your own local setup, using the dumping instructions
@@ -33,8 +33,8 @@ built from it.
   [flashing](#flashing), [writing an app](#writing-a-new-app),
   [finding firmware functions](#finding-firmware-functions)
 - [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
-  [flash layout](#flash-layout), [software stack](#software-stack), [assets](#assets-inside-firm),
-  [SDK internals](#sdk-internals), [audio](#audio), [recording](#recording),
+  [flash layout](#flash-layout), [boot ROM](#boot-rom), [software stack](#software-stack),
+  [assets](#assets-inside-firm), [SDK internals](#sdk-internals), [audio](#audio), [recording](#recording),
   [SD card](#sd-card), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
   [Windows flashing setup](#windows-flashing-setup)
 - [Gotchas](#gotchas) and [open questions](#open-questions)
@@ -71,6 +71,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | Path | What |
 |---|---|
 | `firmware_2M.bin` | Original flash dump (must not be modified) |
+| `bootrom.bin` | Boot ROM dump (optional, for Ghidra; see [Boot ROM](#boot-rom)) |
 | `work/` | Unpacked assets (`assets.py unpack`), including a custom 96x96 welcome banner |
 | `tools/slfw.py` | Flash image parser: layout, partitions, checksums |
 | `tools/assets.py` | Asset unpack/pack/preview, and app injection (`pack --app`) |
@@ -276,14 +277,16 @@ reader in normal operation.
 
 | Address | What |
 |---|---|
-| `0x00000000` | Boot ROM (ROM memcpy at `0xB2A`, printf to the debug UART at `0x2B0`) |
+| `0x00000000` | Boot ROM, contents up to `0x5BEB4` (see [Boot ROM](#boot-rom)) |
 | `0x00800000`-`~0x0087FFFF` | RAM. App initial SP `0x0086B710`, bootloader SP `0x0083BE90` |
+| `0x00800000`-`0x00804AB0` | Boot ROM `.data` and `.bss`: RAM vector table, hook tables, FreeRTOS state |
 | `0x00804800` | App vector table (FIRM RAM block), reset at `0x00804C40` |
 | `0x0080CC40`-`0x0081AAEC` | App `.data`, copied from flash `0x39470`-`0x4731C` at startup (RAM = flash offset + `0x7D37D0`) |
 | `0x0081AAEC`-`0x0086B710` | App `.bss` (zeroed by Reset_Handler) |
 | `0x0081FBC0` | Bootloader vector table (loaded from flash `0x60`), reset at `0x00820000` |
 | `0x00876000` | LVGL heap (40 KB TLSF pool) |
 | `0x00C00000` | SPI flash, memory mapped (XIP). Flash offset `X` is at `0xC00000 + X` |
+| `0x30000000` | Flash controller registers (base of the ROM's flash driver) |
 | `0x40000000`-`0x400FFFFF` | Peripheral registers |
 | `0xE000E018` | SysTick current value (used as a random seed) |
 
@@ -291,7 +294,7 @@ reader in normal operation.
 
 | Flash offset | Size | Content |
 |---|---|---|
-| `0x000000` | 0x60 | `HLKJ` header: +4 load address, +8 entry, +0xC code offset, +0x10 code size, +0x14 CRC16, +0x20 partition table offset |
+| `0x000000` | 0x60 | `HLKJ` header: +4 load address, +8 entry, +0xC code offset, +0x10 code size, +0x14 CRC16, +0x20 partition table offset, +0x5C CRC16 of the header's first 0x5C bytes |
 | `0x000060` | 0xC8EC | Bootloader (FreeRTOS-based; LCD/SD init, firmware update from PC/SD) |
 | `0x00D000` | 0x40 | Partition table: u32 count (3), ..., 16-byte entries from +0x10: name, offset, size, CRC16 |
 | `0x00E000` | 0x174270 | `FIRM` main application |
@@ -317,15 +320,79 @@ The rest of FIRM runs in place from flash. There is a 130 KB zero-filled run at 
 `0x18A8E`-`0x39470`, right before the `.data` load image; its purpose is unknown, so the tools
 leave it alone.
 
-**Checksums**: CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over the bootloader, FIRM, TONE and
-the FIRM RAM block. There are no signatures. `slfw.py fixcrc` reproduces the original dump byte
-for byte.
+**Checksums**: CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over the bootloader, FIRM, TONE,
+the FIRM RAM block and the `HLKJ` header itself. There are no signatures. `slfw.py fixcrc`
+reproduces the original dump byte for byte.
+
+### Boot ROM
+
+The chip's mask ROM is mapped at `0x00000000`. To dump it, put the player in bootloader mode and
+run `smartlink_flash/smtlink_dump.exe init read_mem 0 0x60000 bootrom.bin`. A larger read works
+too, since everything past the ROM reads as zeros. Keep the file as `bootrom.bin` next to the
+firmware dump; `ghidra/import.sh` maps it into both programs.
+
+The contents end at `0x5BEB4`, so the ROM is probably 384 KB: code, then constant tables, then
+the initial values of its `.data` at `0x5B800`.
+
+**Startup.**
+- `rom_reset` (0x40) first checks `0x4000000C`. If it is non-zero, it jumps through the word at
+  `0x30000600` (purpose unknown).
+- Otherwise it copies `.data` to `0x800000`-`0x8006B4`, zeroes `.bss` up to `0x804AB0` and calls
+  `rom_main` (0x4C9C8).
+- `rom_boot` (0x4C914) points the vector table at RAM (`VTOR = 0x800000`), sets up the timer and
+  reads the boot key pin (`0x30000`: port 3, pin 0; low when held).
+- **Boot key held:** `rom_usb_download` (0x4C8A0) briefly waits for a USB host (`301A:2800`). If
+  none answers, it goes on to boot from flash.
+- **Flash boot** (`rom_flash_boot` 0x4CD7C):
+  1. Reads the 0x5C-byte `HLKJ` header from flash 0 and checks the magic and the CRC16 at +0x5C.
+     It tries 3 times, then 3 more times at flash 0x1000 (a backup location this firmware doesn't
+     use).
+  2. Copies +0x10 bytes from flash +0xC to RAM at +4 in 2 KB reads. The flash controller computes
+     the CRC16 in hardware, and the result is compared with +0x14.
+  3. Disables interrupts and calls +8.
+
+  If any step fails, it stays in USB download mode for good. That is why a bad flash can always
+  be recovered.
+- Progress codes go to `0x40000100` along the way: `0x1010`-`0x1055` during the checks, `0x1234`
+  just before the jump.
+
+**Contents.** The firmware calls about 300 ROM functions from 6,000 call sites.
+
+| ROM range | What |
+|---|---|
+| `0x0`-`0x1000` | Debug UART and printf (0x2B0), pin setup and GPIO input (0x7AC, 0x7EC), C library (`memcpy` 0xB2A, `memset` 0xBAA, `memmove`, `memcmp`, `strlen`, `strcmp`, `strcpy`, `atoi`, `qsort`) |
+| `0x1000`-`0x2000` | PCM sample conversions; compiler helpers (`__aeabi_dadd` and the other double ops, `__aeabi_ldivmod`/`uldivmod`) |
+| `0x2000`-`0xC000` | Clock gates (`rom_clk_enable` 0x2564), SPI flash, timer delays, FreeRTOS kernel and heap (`xTaskCreate` 0x8A30, `pvPortMalloc` 0x9D50, queues, event groups) |
+| `0x10000`-`0x20000` | Audio decoding in float: an MP4/M4A atom parser (0x1BED0 holds `alac`, `mp4a`, `esds`), an MP3 Xing header parser (0x1D360) |
+| `0x20000`-`0x42000` | Bluetooth (called from the firmware's `hci_*` functions) |
+| `0x45000`-`0x5B800` | WAV decoders: a codec table by format tag at 0x59600 (PCM, MS ADPCM, float, A-law, µ-law, IMA ADPCM, ...). Also a file type table at 0x59680 (WAVE, the ASF header GUID, OggS, fLaC, ftyp, MAC, RIFF), table-based `sinf`/`cosf`/`log2f`/`exp2f`, filter tables, and the boot code |
+
+**RAM.** The ROM's `.data` and `.bss` are at `0x800000`-`0x804AB0` and contain:
+- the RAM vector table;
+- the printf output hooks at `0x80082C`, set by `rom_printf_init` (0x2A0);
+- a memory pool for the audio code and its hook table at `0x800988`;
+- another alloc/free hook pair at `0x8009CC`;
+- the FreeRTOS kernel's state.
+
+The firmware leaves this area alone. Its own RAM starts at `0x804800`; the ROM's `.bss` above that
+is only used during boot.
+
+**Using it.**
+- `fw.h` binds the C library, `rom_tick_count` (FreeRTOS ticks at 1 kHz, i.e. milliseconds),
+  busy-wait delays, critical sections, clock gates and GPIO input.
+- The SDK's `memset`, `memcpy`, `memmove` and `strlen` forward to the ROM.
+- All the names are in `ROM_FUNCTIONS` in `ghidra/scripts/SL6801Setup.java`.
+
+**FPU.** The CPU has a single-precision FPU (Cortex-M4F). The ROM's `xPortPendSVHandler` saves FPU
+registers, and both the ROM and the firmware are built hard-float. The SDK builds with
+`-mfloat-abi=soft`, so it can't call functions that take floats, such as `rom_sinf`.
 
 ### Software stack
 
 From strings and decompilation:
 
-- FreeRTOS with an OAL layer and Linux-style device nodes: `/dev/lcd`, `/dev/audio0` (play),
+- FreeRTOS (the kernel is in the [boot ROM](#boot-rom)) with an OAL layer and Linux-style device
+  nodes: `/dev/lcd`, `/dev/audio0` (play),
   `/dev/audio1` (record), `/dev/fm`, `/dev/tp`, `/dev/usbd`, `/dev/uart0..2`, `/dev/key_io`,
   `/dev/key_onoff`, `/dev/kadc_ch1`, `/dev/timer`.
 - LVGL v8.3 (source path `F:\pen133_yp3_mp\spark2\src\gui8\lvgl\...`), configured with
@@ -347,10 +414,6 @@ From strings and decompilation:
   EQ.
 - UI pages are created by `view_page_create` (0xD04A1C), a switch on page id; page handlers are
   `pageN_*_process` functions.
-
-The app also calls into the boot ROM (e.g. `bl 0x2b0`, `b.w 0x2564`). A ROM dump would help
-deeper work: `smtlink_dump init read_mem 0 0x10000 rom.bin` (size is a guess). Until then the
-Ghidra setup fills the ROM with `bx lr` stubs.
 
 ### Assets inside FIRM
 
@@ -742,15 +805,18 @@ and 0xA3 and record code 0x92 from the table above.
 
 ### Ghidra
 
-- `ghidra/import.sh [firmware.bin]` builds `ghidra/project/sl6801.gpr` with two programs:
-  - `sl6801_app`: the main firmware, 4811 functions, 354 named.
+- `ghidra/import.sh [firmware.bin [bootrom.bin]]` builds `ghidra/project/sl6801.gpr` with two
+  programs, both with the boot ROM at 0 (bx lr stubs if there is no `bootrom.bin`):
+  - `sl6801_app`: the main firmware, about 4,700 functions (370 named), plus 1,500 in the ROM
+    (100 named).
   - `sl6801_boot`: the bootloader. Only its block at 0x81FBC0+ is the bootloader proper.
 - The scripts in `ghidra/scripts/`:
-  - `SL6801Setup.java` sets up the memory map (flash, RAM copies, a stub ROM), vectors, and
-    function seeds from code pointers.
+  - `SL6801Setup.java` sets up the memory map (flash, RAM copies, the ROM), names the ROM
+    functions from its `ROM_FUNCTIONS` table, and seeds functions from vectors and code pointers.
   - `SL6801Names.java` names functions after their `__func__` strings and exports
     `ghidra/out/<program>_functions.csv`.
-  - `SL6801Fixups.java` clears the "no return" flag on ROM stubs such as `rom_printf` (0x2B0).
+  - `SL6801Fixups.java` clears the "no return" flag that analysis puts on returning ROM
+    functions such as `rom_printf` (0x2B0).
 - `ghidra/decompile.sh <app|boot> <out.c> <name|0xaddr>...` decompiles from the saved project
   without re-analysis.
 
@@ -778,7 +844,9 @@ and 0xA3 and record code 0x92 from the table above.
 
 - What the 130 KB zero run inside FIRM is for, and FIRM header field +0x10.
 - Whether the vendor firmware ever writes to the free flash area (no problems seen so far).
-- A boot ROM dump, to name the ROM functions the app calls.
+- What the ROM's reset path through the word at `0x30000600` is for (taken when `0x4000000C` is
+  non-zero).
+- Most of the ROM's audio and Bluetooth functions are still unnamed.
 - Somewhere persistent to store app data (e.g. high scores) without globals: a free field in the
   `PSMP` settings or a spare pointer in the firmware's RAM.
 

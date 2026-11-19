@@ -3,6 +3,7 @@
 Layout (offsets are into the raw SPI flash dump):
   0x000000  HLKJ bootloader header (0x60 bytes) + bootloader code, loaded to RAM
   hdr+0x20  offset of partition table
+  hdr+0x5C  CRC16 of the header's first 0x5C bytes
   partition table: u32 count, u32 version?, then 16-byte entries starting at +16:
       char name[4]; u32 offset; u32 length; u16 crc16 (at +12, or +14 if ver>=0x30)
 """
@@ -74,6 +75,8 @@ class Image:
                          crc16(self.data[f["ram_src"]:f["ram_src"] + f["ram_size"]]))
         b = self.boot
         struct.pack_into("<I", self.data, 0x14, crc16(self.data[b["off"]:b["off"] + b["size"]]))
+        # The boot ROM checks this CRC of the header's first 0x5C bytes.
+        struct.pack_into("<I", self.data, 0x5C, crc16(self.data[:0x5C]))
         for p in self.partitions():
             if p["name"] == "PSMP":
                 continue
