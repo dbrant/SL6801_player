@@ -75,7 +75,25 @@ void fw_sound_play(fw_sound_t *s, const fw_tone_t *tones, uint8_t count);
 void fw_sound_close(fw_sound_t *s);
 #define FW_SFX(tones) (tones), (uint8_t)(sizeof(tones) / sizeof((tones)[0]))
 
+/* ---------------------------------------------------------------- microphone
+ * 16 kHz, 16-bit stereo capture from /dev/audio1 (the firmware's record test settings), read by
+ * its own task into a ring of the last FW_MIC_RING frames. The microphone is on the right channel.
+ * fw_mic_open returns NULL when the device is in use or there is not enough memory; the other
+ * functions accept NULL. */
+#define FW_MIC_RATE 16000
+#define FW_MIC_RING 1024
+typedef struct fw_mic fw_mic_t;
+
+fw_mic_t *fw_mic_open(void);
+/* Copies the newest frames (interleaved left/right samples) into dst, at most FW_MIC_RING / 2.
+ * Returns the number copied: fewer than asked right after opening. */
+uint32_t fw_mic_latest(fw_mic_t *m, int16_t *dst, uint32_t frames);
+/* Stops the capture task and closes the device. */
+void fw_mic_close(fw_mic_t *m);
+
 /* ---------------------------------------------------------------- small helpers */
+/* True if the device is open, or missing. */
+bool fw_dev_busy(const char *name);
 char *fw_put_str(char *p, const char *s);
 char *fw_put_dec(char *p, uint32_t v);
 char *fw_put_hex(char *p, uint32_t v, int digits);

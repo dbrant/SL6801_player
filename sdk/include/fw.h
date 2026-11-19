@@ -35,6 +35,8 @@ typedef struct {
 /* Palette of 16 lv_color32_t (b, g, r, a) followed by rows of 4-bit indices, first pixel in the
  * high nibble. Drawn with per-entry alpha, so opaque entries need a = 0xFF. */
 #define LV_IMG_CF_INDEXED_4BIT 9
+/* The same with 4 palette entries and 2-bit indices, first pixel in the top bits. */
+#define LV_IMG_CF_INDEXED_2BIT 8
 #define LV_IMG_HEADER(cf, w, h) ((uint32_t)(cf) | ((uint32_t)(w) << 10) | ((uint32_t)(h) << 21))
 
 /* lv_group_t: frozen is bit 0 and editing bit 1 of the byte at offset 0x18. */
@@ -211,6 +213,7 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
 #define fw_dev_open FW_FN(0x00D44604, void *, (const char *name, int flags, const void *params))
 #define fw_dev_close FW_FN(0x00D44674, int, (void **node)) /* also clears *node */
 #define fw_dev_write FW_FN(0x00D446BE, int, (void *node, const void *buf, uint32_t count, int flags))
+#define fw_dev_read FW_FN(0x00D4469C, int, (void *node, void *buf, uint32_t count, int flags))
 
 /* "/dev/audio0" open parameters (10 words): channels, bytes per sample, sample rate (above 16000;
  * lower rates fail), period in frames (every write must be exactly one period), number of
@@ -219,6 +222,12 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
  * The callback gets (arg, 1) after open and (arg, 2) on close; FW_AUDIO_PA_CB is the video
  * player's, which switches the speaker amplifier on (if the Speaker setting is on) and off. */
 #define FW_AUDIO_PA_CB 0x00CF34C5u
+
+/* "/dev/audio1" (record) open parameters: the same layout, except that word 7 selects the input:
+ * byte 0 is the AMIC gain for 2 channels (0: default), byte 1 the input source. The firmware's
+ * record test uses 2 channels, 16000 Hz, period 128, 2 periods and source 7. A read (count in
+ * frames, any number) starts capture, blocks until the frames are in and returns count; reading
+ * too slowly drops frames. */
 
 /* Playback DMA state of the audio hardware, read by its interrupt (0x8167E8). In state PLAYING the
  * interrupt starts the next period from the ring, even after the device has been closed and the

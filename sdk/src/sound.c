@@ -55,25 +55,6 @@ struct fw_sound {
 	int16_t buf[PERIOD * 2];
 };
 
-static bool str_eq(const char *a, const char *b)
-{
-	while (*a && *a == *b)
-		a++, b++;
-	return *a == *b;
-}
-
-/* True if the device is open, or missing. */
-static bool device_busy(const char *name)
-{
-	void **head = FW_DEV_LIST;
-	for (void **link = *head; link != head; link = *link) {
-		uint8_t *node = (uint8_t *)link - 0x14;
-		if (str_eq(*(const char **)node, name))
-			return node[0x10] & 1;
-	}
-	return true;
-}
-
 static void start_tone(voice_t *v)
 {
 	const fw_tone_t *t = v->tone;
@@ -219,7 +200,7 @@ static void release(fw_sound_t *s)
 
 fw_sound_t *fw_sound_open(void)
 {
-	if (device_busy(AUDIO_DEV) || fw_os_heap_free() < sizeof(fw_sound_t) + HEAP_RESERVE)
+	if (fw_dev_busy(AUDIO_DEV) || fw_os_heap_free() < sizeof(fw_sound_t) + HEAP_RESERVE)
 		return NULL;
 	fw_sound_t *s = fw_os_calloc(1, sizeof(*s));
 	if (!fw_is_ram(s))

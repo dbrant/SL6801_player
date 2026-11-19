@@ -11,7 +11,8 @@ What works so far, all tested on the device:
 - **Custom code**: C apps are compiled to run in place from free flash and call the firmware's own
   LVGL and UI functions. A patched call adds their rows to the firmware's "APP" menu.
 - **Apps**: *Flutter* (a side-scrolling Flappy Bird style game), *Mp3tris* (a Tetris clone),
-  *Key test* (shows key codes), and *Sound test* (exercises audio functions).
+  *Key test* (shows key codes), *Sound test* (exercises audio functions), and *Mic scope* (an
+  oscilloscope view of the microphone).
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 functions named automatically, plus headless decompilation
   scripts.
@@ -32,7 +33,8 @@ built from it.
   [finding firmware functions](#finding-firmware-functions)
 - [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
   [flash layout](#flash-layout), [software stack](#software-stack), [assets](#assets-inside-firm),
-  [SDK internals](#sdk-internals), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
+  [SDK internals](#sdk-internals), [audio](#audio), [recording](#recording),
+  [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
   [Windows flashing setup](#windows-flashing-setup)
 - [Gotchas](#gotchas) and [open questions](#open-questions)
 
@@ -51,7 +53,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -78,7 +80,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/keytest`, `flutter`, `mp3tris` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `keytest`, `soundtest`, `micscope` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -219,6 +221,9 @@ Rules and tips:
   Effects are tables of `fw_tone_t`. Both games keep theirs in `sfx.h`. To listen to them on the
   PC, build `sdk/test/sfx_preview.c` (instructions at its top), which writes all of an app's
   effects to a WAV file.
+- **Microphone**: `fw_mic_open()` when the app opens, `fw_mic_latest(mic, buf, frames)` from a
+  timer to get the newest stereo samples, `fw_mic_close()` in `on_delete`. See Mic scope and
+  [Recording](#recording).
 - **Host testing**: game logic can be compiled and run on the PC with MSYS2 gcc. `#undef` the
   `fw.h` macros the app uses, define stubs, then `#include "main.c"`.
   `sdk/apps/mp3tris/test/host_test.c` drives the game with fake events and ticks, and `show.py`
@@ -513,10 +518,11 @@ database is rescanned after files are copied to the card.
 
 **Device layer.** Drivers are nodes in a list at 0x81D40C. The calls are `fw_dev_open(name,
 flags, params)` (0xD44604), `fw_dev_close(&node)` (0xD44674) and `fw_dev_write(node, buf, count,
-0)` (0xD446BE).
+0)` (0xD446BE). A device's driver functions are read, write, event, open and close at the start
+of the object its probe function returns.
 - Opening a device that is already open returns the same node without reopening it. Closing that
-  node would close the other user's stream, so `sdk/src/sound.c` checks the node's "open" flag
-  first and stays silent if the device is busy.
+  node would close the other user's stream, so the SDK checks the node's "open" flag first
+  (`fw_dev_busy`) and does nothing if the device is busy.
 
 **`/dev/audio0`** (driver functions: open 0xD46434, write 0xD4628C, close 0xD462BC) takes 10
 words of open parameters:
@@ -594,6 +600,34 @@ On failure, the allocation and task functions return `printf`'s return value ins
 It mixes up to 4 synthesized voices: square, triangle or noise, with a linear frequency slide and
 a decaying envelope. The games have no sound while the music player has the audio device open.
 Whether the music player keeps the device open while paused or stopped hasn't been tested yet.
+
+### Recording
+
+**`/dev/audio1`** is registered with the same probe as `/dev/audio0` (0xD46300, descriptors at
+0xCB4E90). Its driver functions are open 0xD46124, close 0xD46108 and read 0xD46068, which jumps
+to the stream read at 0x813A74 in RAM. `fw_dev_read(node, buf, frames, 0)` (0xD4469C) calls it.
+
+Its 10 open parameters have the `/dev/audio0` layout, except word 7:
+- channels, bytes per sample, sample rate, period (frames), periods, start threshold, 0, 0;
+- word 7: byte 0 is the AMIC gain (only used with 2 channels; 0 sets the defaults 0x1C and
+  0x54), byte 1 the input source. Each source switches on a different set of codec inputs
+  (`FUN_00D4606E`);
+- event callback and argument, which open does not use.
+
+A read takes any number of frames, starts capture if needed, and blocks (polling every 1 ms, for
+up to 3 s) until they are in. Close stops capture and frees the stream.
+
+The firmware's sources:
+- A debug shell command (`FUN_00CDA798`) records 2 channels at 16 kHz, period 128, 2 periods,
+  source 7 into a buffer, then plays it back on `/dev/audio0`.
+- The voice recorder's PCM input (`FUN_00D49500`, "recopcm") picks the channel count from the
+  source: 1 for sources 0-4, 9 and 10, 2 for 5-8 and 11, 3 for 12 and 13. Which source the
+  recorder uses hasn't been traced yet.
+
+**SDK mic module** (`sdk/src/mic.c`) uses the debug shell's settings. With them, the player's
+microphone is on the right channel; the left one stays silent. A task owns the device and
+reads one period at a time into a ring of 1024 frames; `fw_mic_latest` copies the newest frames
+out; `fw_mic_close` stops the task and frees the state from a UI timer, like the sound module.
 
 ### Buttons and key events
 
