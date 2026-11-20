@@ -2,11 +2,11 @@
  * "Benchmark" entry in the APP menu: CPU clock, memory and flash throughput, and math speed.
  * Center runs it again, Back exits.
  *
- * A task below the UI task's priority runs the tests one by one and times each with the ROM's
- * 64-bit hardware timer; the UI shows results as they come in. Firmware tasks still run in
- * between, so results vary a little from run to run. The CPU clock comes from the Cortex-M cycle
- * counter (DWT CYCCNT) against the timer, or from the SysTick reload if the cycle counter doesn't
- * run. Closing frees the task's state from a UI timer once it is done, as in sdk/src/mic.c.
+ * A low-priority worker task on CPU0 runs the tests one by one and times each with the ROM's
+ * 64-bit hardware timer; the UI (on CPU1) shows results as they come in. Firmware tasks still run
+ * in between, so results vary a little from run to run. The CPU clock comes from the Cortex-M
+ * cycle counter (DWT CYCCNT) against the timer, or from the SysTick reload if the cycle counter
+ * doesn't run.
  *
  * Dmitry Brant, 2026
  */
@@ -23,9 +23,8 @@
 #define DIV_ITERS 50000
 #define TASK_PRIORITY 2
 #define TASK_STACK 0x400 /* words */
-#define HEAP_RESERVE 0x8000
+#define POLL_MS 10
 #define TICK_MS 100
-#define REAP_MS 20
 #define LINE_H 15
 
 #define DEMCR (*(volatile uint32_t *)0xE000EDFCu)
@@ -45,15 +44,10 @@ static const struct {
 	{"double", "MFLOPS"},     {"rom_sinf", "M/s"},    {"64-bit div", "M/s"},
 };
 
-/* Shared by the UI and the bench task, on the firmware heap. */
+/* The worker's memory, shared by the UI and the bench task. */
 typedef struct {
-	void *task;
-	void *wake; /* given to start a run or to stop */
-	volatile bool stop;
-	volatile bool done; /* set by the task as its last action */
 	volatile bool run;  /* a run is requested or in progress */
 	volatile uint8_t current; /* test being run; TESTS when idle */
-	uint8_t reap_ticks;
 	volatile uint32_t version; /* bumped after each result */
 	volatile uint32_t result[TESTS]; /* value x10, or 0 if not measured */
 	volatile uint32_t run_ms;
@@ -66,7 +60,8 @@ typedef struct {
 
 typedef struct {
 	fw_overlay_t *ov;
-	bench_t *b;
+	fw_worker_t *w;
+	bench_t *b; /* the worker's memory, once it runs */
 	lv_timer_t *timer;
 	lv_obj_t *names, *values, *status;
 	uint32_t shown; /* b->version last shown */
@@ -180,13 +175,13 @@ static uint32_t div64_x10(bench_t *b)
 	return r;
 }
 
-static void run_all(bench_t *b)
+static void run_all(fw_worker_t *w, bench_t *b)
 {
 	uint64_t start = rom_timer_read64();
 	for (int t = 0; t < TESTS; t++)
 		b->result[t] = 0;
 	b->version++;
-	for (int t = 0; t < TESTS && !b->stop; t++) {
+	for (int t = 0; t < TESTS && !w->stop; t++) {
 		b->current = (uint8_t)t;
 		uint32_t r;
 		switch (t) {
@@ -211,45 +206,15 @@ static void run_all(bench_t *b)
 		}
 		b->result[t] = r;
 		b->version++;
-		fw_sem_take(&b->wake, 1); /* let the UI catch up */
+		fw_os_sleep(1); /* let other tasks catch up */
 	}
 	b->run_ms = (uint32_t)(elapsed_us(start) / 1000);
 	b->current = TESTS;
 }
 
-static void bench_task(void *arg)
+static void bench_task(fw_worker_t *w)
 {
-	bench_t *b = arg;
-	while (!b->stop) {
-		if (b->run) {
-			run_all(b);
-			b->run = false;
-			b->version++;
-		}
-		fw_sem_take(&b->wake, -1);
-	}
-	b->done = true;
-}
-
-/* UI timer: frees the shared state once the task is done (see fw_mic_close). */
-static void reap(lv_timer_t *t)
-{
-	bench_t *b = t->user_data;
-	if (!b->done || b->reap_ticks++ == 0)
-		return;
-	fw_task_join(b->task);
-	fw_sem_delete(&b->wake);
-	fw_os_free(b);
-	lv_timer_del(t);
-}
-
-static bench_t *start_bench(void)
-{
-	if (fw_os_heap_free() < sizeof(bench_t) + TASK_STACK * 4 + HEAP_RESERVE)
-		return NULL;
-	bench_t *b = fw_os_calloc(1, sizeof(bench_t));
-	if (!fw_is_ram(b))
-		return NULL;
+	bench_t *b = w->mem;
 	for (int i = 0; i < 4; i++)
 		b->fin[i] = 0.5f + 0.125f * (float)i;
 	b->fin[4] = 0.9999f;
@@ -258,15 +223,14 @@ static bench_t *start_bench(void)
 		b->src[i] = (uint8_t)i;
 	b->current = TESTS;
 	b->run = true;
-	b->wake = fw_sem_create();
-	if (fw_is_ram(b->wake)) {
-		b->task = fw_task_create(bench_task, b, "bench", TASK_PRIORITY, TASK_STACK);
-		if (fw_is_ram(b->task))
-			return b;
-		fw_sem_delete(&b->wake);
+	while (!w->stop) {
+		if (b->run) {
+			run_all(w, b);
+			b->run = false;
+			b->version++;
+		}
+		fw_os_sleep(POLL_MS);
 	}
-	fw_os_free(b);
-	return NULL;
 }
 
 /* ---------------------------------------------------------------- UI */
@@ -308,6 +272,15 @@ static void show(app_t *app)
 static void tick(lv_timer_t *t)
 {
 	app_t *app = t->user_data;
+	if (!app->b) {
+		app->b = fw_worker_mem(app->w);
+		if (!app->b) {
+			if (fw_worker_failed(app->w))
+				lv_label_set_text(app->status, "Out of memory");
+			return;
+		}
+		app->shown = app->b->version - 1;
+	}
 	uint32_t v = app->b->version;
 	if (v != app->shown) {
 		app->shown = v;
@@ -320,12 +293,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
-	bench_t *b = app->b;
-	if (b) {
-		b->stop = true;
-		fw_sem_give(&b->wake);
-		lv_timer_create(reap, REAP_MS, b); /* if this fails, b and the task stay allocated */
-	}
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -340,10 +308,8 @@ static void key_cb(lv_event_t *e)
 		fw_overlay_close(app->ov); /* frees app via on_delete */
 		return;
 	case FW_KEY_CENTER:
-		if (app->b && !app->b->run) {
+		if (app->b && !app->b->run)
 			app->b->run = true;
-			fw_sem_give(&app->b->wake);
-		}
 		return;
 	default:
 		return;
@@ -381,13 +347,11 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_set_pos(app->status, 2, (lv_coord_t)(h - LINE_H));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	app->b = start_bench();
-	if (!app->b) {
-		lv_label_set_text(app->status, "Out of memory");
+	app->w = fw_worker_start(bench_task, sizeof(bench_t), "bench", TASK_PRIORITY, TASK_STACK);
+	if (!app->w) {
+		lv_label_set_text(app->status, "Busy, try again");
 		return;
 	}
-	show(app);
-	app->shown = app->b->version;
 	app->timer = lv_timer_create(tick, TICK_MS, app);
 }
 

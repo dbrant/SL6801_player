@@ -24,7 +24,6 @@
 #define STRIDE (IMG_W / 2)
 #define PALETTE_SIZE (16 * 4)
 #define PX_SIZE (PALETTE_SIZE + STRIDE * IMG_H)
-#define HEAP_RESERVE 0x8000
 #define LINE_H 15
 #define POLL_MS 20
 #define RECENT_TICKS 75 /* 1.5 s */
@@ -45,7 +44,8 @@ typedef struct {
 	uint32_t level[PORTS];
 	uint16_t changes[ALL_PINS];
 	uint8_t recent[ALL_PINS];
-	uint8_t *px; /* PX_SIZE bytes on the firmware heap, sparing the 40 KB UI heap */
+	fw_worker_t *w; /* memory only: the image, sparing the 40 KB UI heap */
+	uint8_t *px;    /* the worker's PX_SIZE bytes, once allocated */
 } app_t;
 
 static uint32_t pin_id(int pin)
@@ -120,9 +120,37 @@ static void read_pins(uint32_t *level)
 	}
 }
 
+static void start_view(app_t *app)
+{
+	for (int i = 0; i < PAL_COUNT; i++) {
+		app->px[i * 4 + 0] = palette_rgb[i][2];
+		app->px[i * 4 + 1] = palette_rgb[i][1];
+		app->px[i * 4 + 2] = palette_rgb[i][0];
+		app->px[i * 4 + 3] = 0xFF;
+	}
+	read_pins(app->level);
+	for (int pin = 0; pin < ALL_PINS; pin++)
+		draw_cell(app, pin);
+	app->dsc.header = LV_IMG_HEADER(LV_IMG_CF_INDEXED_4BIT, IMG_W, IMG_H);
+	app->dsc.data_size = PX_SIZE;
+	app->dsc.data = app->px;
+	app->img = lv_img_create(app->ov->root);
+	lv_img_set_src(app->img, &app->dsc);
+	lv_obj_set_pos(app->img, 0, 1);
+	update_text(app);
+}
+
 static void tick(lv_timer_t *t)
 {
 	app_t *app = t->user_data;
+	if (!app->px) {
+		app->px = fw_worker_mem(app->w);
+		if (app->px)
+			start_view(app);
+		else if (fw_worker_failed(app->w))
+			lv_label_set_text(app->cursor_info, "Out of memory");
+		return;
+	}
 	uint32_t now[PORTS];
 	read_pins(now);
 	bool dirty = false, text = false;
@@ -153,8 +181,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
-	if (app->px)
-		fw_os_free(app->px);
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -171,7 +198,7 @@ static void key_cb(lv_event_t *e)
 {
 	app_t *app = lv_event_get_user_data(e);
 	uint32_t key = *(uint32_t *)lv_event_get_param(e);
-	if (!app->px) { /* out of memory: only leaving works */
+	if (!app->px) { /* no image yet (or out of memory): only leaving works */
 		if (key == FW_KEY_BACK || key == FW_KEY_BACK_LONG || key == LV_KEY_ESC)
 			fw_overlay_close(app->ov);
 		return;
@@ -224,29 +251,11 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_set_pos(app->last_info, 2, (lv_coord_t)(h - LINE_H));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	if (fw_os_heap_free() >= PX_SIZE + HEAP_RESERVE)
-		app->px = fw_os_calloc(1, PX_SIZE);
-	if (!fw_is_ram(app->px)) {
-		app->px = NULL;
-		lv_label_set_text(app->cursor_info, "Out of memory");
+	app->w = fw_worker_start(NULL, PX_SIZE, NULL, 0, 0);
+	if (!app->w) {
+		lv_label_set_text(app->cursor_info, "Busy, try again");
 		return;
 	}
-	for (int i = 0; i < PAL_COUNT; i++) {
-		app->px[i * 4 + 0] = palette_rgb[i][2];
-		app->px[i * 4 + 1] = palette_rgb[i][1];
-		app->px[i * 4 + 2] = palette_rgb[i][0];
-		app->px[i * 4 + 3] = 0xFF;
-	}
-	read_pins(app->level);
-	for (int pin = 0; pin < ALL_PINS; pin++)
-		draw_cell(app, pin);
-	app->dsc.header = LV_IMG_HEADER(LV_IMG_CF_INDEXED_4BIT, IMG_W, IMG_H);
-	app->dsc.data_size = PX_SIZE;
-	app->dsc.data = app->px;
-	app->img = lv_img_create(root);
-	lv_img_set_src(app->img, &app->dsc);
-	lv_obj_set_pos(app->img, 0, 1);
-	update_text(app);
 	app->timer = lv_timer_create(tick, POLL_MS, app);
 }
 

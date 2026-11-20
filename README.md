@@ -23,6 +23,7 @@ What works so far, all tested on the device:
   - *Benchmark*: CPU clock, memory, flash and math speed.
   - *Pin monitor*: live GPIO levels.
   - *Files*: an SD card browser with a hex and text viewer.
+  - *Crash log*: the black box that writes crash and hang reports to the SD card.
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 firmware functions named automatically and 100 boot ROM
   functions named by hand, plus headless decompilation scripts.
@@ -43,7 +44,7 @@ built from it.
   [finding firmware functions](#finding-firmware-functions)
 - [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
   [flash layout](#flash-layout), [boot ROM](#boot-rom), [software stack](#software-stack),
-  [assets](#assets-inside-firm), [SDK internals](#sdk-internals), [audio](#audio),
+  [assets](#assets-inside-firm), [two cores](#two-cores), [SDK internals](#sdk-internals), [audio](#audio),
   [recording](#recording), [SD card](#sd-card), [files](#files),
   [diagnostic apps](#diagnostic-apps), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
   [Windows flashing setup](#windows-flashing-setup)
@@ -64,7 +65,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap sdk/apps/taskmon sdk/apps/bench sdk/apps/pinmon sdk/apps/files
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap sdk/apps/taskmon sdk/apps/bench sdk/apps/pinmon sdk/apps/files sdk/apps/crashlog
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -90,9 +91,9 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `tools/avicheck.py` | Checks whether an `.avi` file meets the firmware video player's requirements |
 | `tools/find_lv_images.py`, `find_lv_fonts.py`, `render.py`, `findbase.py`, `survey.py` | Analysis helpers used while mapping the firmware (each takes the dump as first argument) |
 | `sdk/include/fw.h` | Firmware API: LVGL and vendor functions by address, types, constants |
-| `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, helpers, libc and compiler helpers (ROM) |
+| `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, CPU0 service and workers, black box, sound and mic, helpers, libc and compiler helpers (ROM) |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
-| `sdk/apps/flutter`, `mp3tris`, `mandel`, `fputest`, `keytest`, `soundtest`, `micscope`, `blockmap`, `taskmon`, `bench`, `pinmon`, `files` | Apps |
+| `sdk/apps/flutter`, `mp3tris`, `mandel`, `fputest`, `keytest`, `soundtest`, `micscope`, `blockmap`, `taskmon`, `bench`, `pinmon`, `files`, `crashlog` | Apps |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -213,20 +214,26 @@ FW_MENU_ITEM(FW_SYMBOL_OK, "Hello", open);
 
 Rules and tips:
 
+- **UI code runs on the second core.** Everything an app does in its menu row, key and delete
+  callbacks and LVGL timers runs on CPU1, while FreeRTOS runs on CPU0 (see
+  [Two cores](#two-cores)). Never call the kernel from there: no `fw_os_*`, `fw_task_*`,
+  `fw_sem_*`, `rom_task_states`, critical sections, FatFs or `fw_dev_*`. Doing so freezes the
+  player at random, mostly during music playback. Use a worker instead.
 - **No writable globals.** Code runs from flash; the linker script rejects `.data` and `.bss`.
   Keep all state in memory from `lv_mem_alloc` and free it in `on_delete`. `static const` tables
   are fine.
 - **Memory is tight.** The LVGL heap is 40 KB for the whole UI. Prefer a few objects; for many
   small elements draw into an indexed image instead (see Mp3tris).
-  - Put buffers of more than a few KB, such as image pixels, on the firmware heap
-    (`fw_os_calloc`), as Mandelbrot and Pin monitor do.
+  - Put buffers of more than a few KB, such as image pixels, in a worker's memory on the
+    firmware heap: `fw_worker_start(NULL, size, NULL, 0, 0)` allocates without a task (see Pin
+    monitor).
   - A large `lv_mem_alloc` can fail when the UI heap is fragmented, and then the app silently
     doesn't open. One that barely succeeds leaves the firmware's own UI short of memory, which
     can crash it later.
 - **Animation**: use `lv_timer_create` and `lv_tick_get`; see Flutter for a fixed-step loop that
   catches up when the timer fires late.
-- **Heavy computation**: run it in a task below the UI task's priority (3) that sleeps briefly
-  now and then, and draw its results from a UI timer; see Mandelbrot.
+- **Heavy computation, files and devices**: run them in a worker task, which shares the worker's
+  memory with the UI, and draw its results from a UI timer; see Mandelbrot and Files.
 - **Math**: `float` runs on the FPU (single precision). `double` is emulated in software and much
   slower. `rom_sinf`, `rom_cosf`, `rom_log2f` and `rom_exp2f` are fast table lookups; see FPU
   test. Mandelbrot uses 32-bit fixed point instead, which has more precision than `float` for
@@ -288,7 +295,7 @@ From photos of the board:
 | Part | Identification |
 |---|---|
 | SoC | "Jointbees MP3 R14181B6A0", QFN-48, really a Smartlink **SL6801** (string `SL6801` in the bootloader). 2 MB flash in the package, no external flash chip. |
-| CPU | ARM Cortex-M4 class with FPU (VFP instructions present). Log strings mention CPU0 and CPU1 (dual core). |
+| CPU | Two Cortex-M4F cores: CPU0 runs FreeRTOS, CPU1 the UI (see [Two cores](#two-cores)). |
 | Display | 128x160 ST7789 TFT on a 20-pin FPC (`st7789s_lcd_init`), RGB565 |
 | FM radio | RDA5807M (marked `5807M`) |
 | Speaker amp | 8002D (SOP-8, class AB) |
@@ -360,8 +367,9 @@ The contents end at `0x5BEB4`, so the ROM is probably 384 KB: code, then constan
 the initial values of its `.data` at `0x5B800`.
 
 **Startup.**
-- `rom_reset` (0x40) first checks `0x4000000C`. If it is non-zero, it jumps through the word at
-  `0x30000600` (purpose unknown).
+- `rom_reset` (0x40) first checks the core ID at `0x4000000C`. On CPU1 it jumps through the
+  word at `0x30000600`, which the firmware sets before starting that core (see
+  [Two cores](#two-cores)).
 - Otherwise it copies `.data` to `0x800000`-`0x8006B4`, zeroes `.bss` up to `0x804AB0` and calls
   `rom_main` (0x4C9C8).
 - `rom_boot` (0x4C914) points the vector table at RAM (`VTOR = 0x800000`), sets up the timer and
@@ -477,6 +485,65 @@ continuously, MSB first. Two kinds:
 **Other data**: Unicode/GBK conversion table around `0xB8000`-`0xC4000` (FatFs code page); the
 `TONE` partition holds the alarm MP3.
 
+### Two cores
+
+The SoC has two Cortex-M4F cores sharing RAM, flash and peripherals; `0x4000000C` bit 0 reads 0
+on CPU0 and 1 on CPU1 (`FW_CORE_ID`).
+- **CPU0** boots, runs FreeRTOS and every task: the music player, the card, the drivers, the
+  firmware heap. The tasks in the Task monitor are all CPU0's.
+- **CPU1** runs the UI. `FUN_00CD85A0` starts it through `FUN_00CD6968`, which writes a
+  trampoline (0xCD6931) to `0x30000600`, the core's stack pointer to `0x30000604` and its entry
+  (0x80DA4F, in RAM) to `0x30000608`, then cycles clock 0. The ROM's reset sends CPU1 through the
+  trampoline, which loads that stack, enables the FPU and jumps to the entry.
+- **The UI loop** (`watch_view_task`, "ViewTask", 0xCD8FE0: LVGL, the firmware's pages, all app
+  UI code) runs on CPU1 on its own stack (around 0x81ABC8-0x81BBD4). It talks to the presenter
+  tasks on CPU0 only through message rings (`FUN_00D043CC` sends, `FUN_00CD9214` receives), and
+  allocates only from LVGL's heap. CPU1 also reads CPU0's `pxCurrentTCB`, which is why the UI
+  seems to run "in" whichever task CPU0 is running.
+- The fault vector table at 0x800000 is shared: a fault on either core goes through it.
+
+**Kernel calls from CPU1 corrupt CPU0's state.** FreeRTOS protects its heap and lists by
+suspending the scheduler or masking interrupts, which only holds off code on CPU0. A heap or
+task call from the UI runs alongside CPU0's own calls and now and then corrupts the heap or the
+ready lists. The player then freezes (often with every task's CPU use stuck at 0), and the
+firmware's watchdog resets it about 15 s later. CPU0 is busiest during music playback, so that
+is when it happens. Early symptoms that were blamed on other causes: devices opened, written or
+closed from UI timers hung or rebooted the player, SD reads from a UI timer rebooted it, and a
+sleep from the UI froze it for good.
+
+**Service and workers** (`sdk/src/service.c`). The SDK replaces the `bl 0xD27AF0` (the watchdog
+setup) at `0xCD8C7A`, which the firmware's first task makes once at startup on CPU0, with
+`hook_cpu0_start`. It calls the original, allocates the state both cores share (its address
+goes in the reserved vector table entry at 0x80001C, as app code has no writable globals) and
+starts the `sdk` service task at priority 18.
+- The UI claims one of `FW_WORKERS` slots with `fw_worker_start(entry, mem_size, name, priority,
+  stack_words)`, which returns at once.
+- The service polls the slots every 5 ms. For a new one it allocates the zeroed memory on the
+  firmware heap (keeping 32 KB free for the firmware), creates the task if there is an entry, and
+  sets the state to RUNNING, or FAILED.
+- The UI reads the state and `fw_worker_mem` from a timer. It shares data with the task through
+  that memory with plain reads and writes; tasks poll for requests with `fw_os_sleep`.
+- `fw_worker_release` sets `stop` and hands the slot back; once the entry has returned the
+  service joins the task, frees the memory and frees the slot.
+
+**Black box** (`sdk/src/blackbox.c`). RAM does not survive the watchdog's reset (it goes through
+the power management chip: `FUN_0080CF9E` sets bit 0x80 of its register 0x20), and the chip
+ignores `SYSRESETREQ`. So reports go to the SD card while CPU0 still runs:
+- Fault vectors 3-6 point to the black box's handler. It records the registers, fault status
+  and stack, then parks a faulting CPU0 task in a sleep loop (by rewriting its stacked pc) so
+  the rest keeps running. A fault on CPU1 just spins there.
+- The `bl fw_watch_checkin` at `0xCD9074`, the UI loop's watchdog check-in, goes to
+  `hook_view_alive`, which timestamps each pass.
+- Every 100 ms the service writes `0:/crashlog.txt` once after a fault or when the UI loop has
+  stopped for 3 s: the fault, every task's state, CPU use, saved pc and lr, the watchdog
+  monitor's bits (0x81D15C) and the heap.
+- While the Crash log app has it turned on, it rewrites `0:/bbstatus.txt` every second with the
+  same state, for hangs that stop CPU0 too.
+
+**Watchdog.** `watch_watchdog_refresh` (0xD27B78) feeds `/dev/wdog` only when every watched task
+has checked in since the last refresh: the UI loop (watch task 3, once per pass) and watch task 9
+(once per message). Otherwise it logs "task %d (%s)is dead" and the player resets.
+
 ### SDK internals
 
 **Calling the firmware.** `fw.h` declares each function as a macro that casts its address (with the
@@ -491,9 +558,9 @@ place.
   (font `0xC810C4`) and a text label. The page state is at `*(0x81CE5C) + 0x1DC`.
 - `sdk/patches.json` redirects the `bl page_home_menu_create` at `0xD04C04` in `view_page_create`
   to `hook_home_menu_create`. The hook calls the original, then appends one row per
-  `FW_MENU_ITEM`. Its second entry installs the Center long-press hook (see
-  [Buttons and key events](#buttons-and-key-events)). The build keeps every patch target when it
-  discards unused code.
+  `FW_MENU_ITEM`. The build keeps every patch target when it discards unused code.
+- The other patches: the key hook (see [Buttons and key events](#buttons-and-key-events)), and
+  the service start and UI loop check-in (see [Two cores](#two-cores)).
 - The linker script collects the `FW_MENU_ITEM` entries between `__fw_menu_start` and
   `__fw_menu_end`.
 - Each row's key handler opens the app on ENTER and passes other keys to
@@ -655,26 +722,26 @@ player again until a power cycle; waiting for the ring to run dry first stopped 
 only once the ring has run dry (state 3). The video player gets this for free, because
 it frees its buffers and closes the file between stopping its task and closing the device.
 
-**Don't touch `/dev/audio0` from the UI task.** The UI runs in `watch_view_task` (0xCD8FE0),
-which calls `lv_timer_handler` (0xD39FC8) in a loop; app timers and key events run inside it.
+**Don't touch `/dev/audio0` from UI code.** The UI loop, `watch_view_task` (0xCD8FE0), calls
+`lv_timer_handler` (0xD39FC8) in a loop on CPU1; app timers and key events run inside it.
 Measured with an earlier version of the Sound test app, which ran each device call from a UI
 timer and logged it on screen first:
-- a write from the UI task that has to wait for ring space hangs for about 10 s and then reboots,
+- a write from the UI that has to wait for ring space hangs for about 10 s and then reboots,
   every time;
-- opening or closing from the UI task sometimes crashes, even with nothing played;
-- joining the sound task, or sleeping while the ring drains, from the UI task hung on exit.
+- opening or closing from the UI sometimes crashes, even with nothing played;
+- joining the sound task, or sleeping while the ring drains, from the UI hung on exit.
 
-The same writes from a separate task always worked. The cause isn't known. The music player
-opens, writes and closes from its own task. The video player opens and closes from presenter
-code, outside LVGL timers and events. Do all device calls from your own task, and finish from a
-UI timer once that task is done. The Sound test app (`sdk/apps/soundtest`) now only checks the SDK
-sound module: it opens it, beeps and closes it three times, logging each step.
+The same writes from a task always worked: the drivers and the kernel belong to CPU0 (see
+[Two cores](#two-cores)). The music player opens, writes and closes from its own task. The video
+player opens and closes from presenter code on CPU0. The Sound test app (`sdk/apps/soundtest`)
+now only checks the SDK sound module: it opens it, beeps and closes it three times, logging each
+step.
 
 **Volume.** `fw_audio_volume()` (0xCDF884) returns the user's volume in the low byte. The video
 player scales samples with `fw_gain_apply(gain, volume, buf, frames)` (0xD47C10) on a gain object
 from `fw_gain_create(0, rate, 2, 2)`.
 
-**OS layer.** The firmware wraps FreeRTOS (all in `fw.h`):
+**OS layer.** The firmware wraps FreeRTOS (all in `fw.h`, all for CPU0 only):
 - tasks: `fw_task_create(entry, arg, name, priority, stack)` (0xCD88A4) and `fw_task_join`
   (0xCD8960), which waits for `entry` to return;
 - binary semaphores: create, take (-1 on timeout), give, delete (0xCD86DE, 0xCD874C, 0xCD876E,
@@ -686,14 +753,15 @@ On failure, the allocation and task functions return `printf`'s return value ins
 `fw_is_ram()` checks results.
 
 **SDK sound module** (`sdk/src/sound.c`) follows the video player:
-- its state is on the firmware heap;
-- a task at priority 6 owns the device. It opens it at 44.1 kHz stereo, 8 periods of 256 frames,
-  with the video player's PA callback, then renders one period at a time with blocking writes;
-- `fw_sound_play` hands requests to the task through a small lock-free queue;
-- `fw_sound_close` only signals a semaphore and returns. The task fills the ring with silence,
-  waits for it to run dry (`FW_AUDIO_HW` state, polled with `fw_os_sleep`), closes the device,
-  sets a flag and returns. A 20 ms LVGL timer then joins the task, which no longer blocks, and
-  frees the state, about 0.1 s after the game has closed.
+- a sound handle is a worker; its memory holds the state;
+- the worker's task, at priority 6, owns the device. It returns at once if the device is busy.
+  Otherwise it opens it at 44.1 kHz stereo, 8 periods of 256 frames, with the video player's PA
+  callback, then renders one period at a time with blocking writes;
+- `fw_sound_play` hands requests to the task through a small lock-free queue in that memory, and
+  drops them until the worker runs;
+- `fw_sound_close` releases the worker. The task fills the ring with silence, waits for it to run
+  dry (`FW_AUDIO_HW` state, polled with `fw_os_sleep`), closes the device and returns; the
+  service then joins it and frees the memory.
 
 It mixes up to 4 synthesized voices: square, triangle or noise, with a linear frequency slide and
 a decaying envelope. The games have no sound while the music player has the audio device open.
@@ -723,9 +791,10 @@ The firmware's sources:
   recorder uses hasn't been traced yet.
 
 **SDK mic module** (`sdk/src/mic.c`) uses the debug shell's settings. With them, the player's
-microphone is on the right channel; the left one stays silent. A task owns the device and
-reads one period at a time into a ring of 1024 frames; `fw_mic_latest` copies the newest frames
-out; `fw_mic_close` stops the task and frees the state from a UI timer, like the sound module.
+microphone is on the right channel; the left one stays silent. A worker task owns the device and
+reads one period at a time into a ring of 1024 frames in the worker's memory; `fw_mic_latest`
+copies the newest frames out, `fw_mic_failed` tells when the device couldn't be opened, and
+`fw_mic_close` releases the worker, like the sound module.
 
 ### SD card
 
@@ -746,12 +815,12 @@ The device ioctl doesn't return the card's size: command 1 calls the media ioctl
 result. The media ioctl itself, `fw_sd_ioctl(cmd, &out)` (0x816778), answers FatFs's commands:
 1 sector count, 2 sector size (512), 3 erase block size (1).
 
-**Don't read the card from the UI task either.** An early SD map read 16 sectors per 20 ms UI
+**Don't read the card from UI code either.** An early SD map read 16 sectors per 20 ms UI
 timer tick; it started drawing sectors, then rebooted the player after a couple of seconds.
 
-**SD map and Flash map** (`sdk/apps/blockmap`, two APP menu rows) now read from their own task
-(priority 4, pausing 2 ms after each row of 16 blocks) and store a color per block; a UI timer
-draws them, and closing frees the state from a UI timer once the task is done, as with audio.
+**SD map and Flash map** (`sdk/apps/blockmap`, two APP menu rows) read from a worker task
+(priority 4, pausing 2 ms after each row of 16 blocks), which also asks the card for its size,
+and store a color per block in the worker's memory; a UI timer draws them.
 SD map reads 512-byte sectors; Flash map reads the memory-mapped flash (`FW_FLASH_BASE`) in
 4 KB erase sectors, two pages for the 2 MB chip. Each block's color is the Shannon entropy of
 its bytes, computed with an integer log2, from blue (0 bits per byte) to red (8). Random data
@@ -789,7 +858,7 @@ Also present: `f_mount` 0xD57888 (only `sdmmc_wrap_init`/`deinit` call it), `f_f
 - Result codes and mode flags are standard FatFs.
 
 **Locking.** Each volume has a FreeRTOS mutex (`FF_FS_REENTRANT`), so calls are safe from any
-task. Still, never call them from the UI task (see above).
+task on CPU0, and never from UI code (see [Two cores](#two-cores)).
 
 **Mounting.**
 - `watch_sdcard_init` (0xD26CB8) mounts the card at startup, on insertion and on wake.
@@ -806,8 +875,8 @@ When that fails, it returns `printf`'s result instead of NULL, and FatFs then wr
 bad pointer, which crashes the player. So make sure the firmware heap has room before calling.
 
 **Files** (`sdk/apps/files`) browses the card and shows files in hex or as text.
-- A task makes all the FatFs calls. The UI posts a request (list a folder, or read 512 bytes at
-  an offset) and polls for the result.
+- A worker task makes all the FatFs calls. The UI posts a request (list a folder, or read 512
+  bytes at an offset) in the worker's memory and polls for the result.
 - Each read opens, seeks, reads and closes the file, so nothing stays open.
 - The task skips a request ("Low memory") when the firmware heap has less than 8 KB free.
 - Folders are listed into a 12 KB name pool (up to 400 entries) and sorted with `rom_qsort`,
@@ -815,19 +884,22 @@ bad pointer, which crashes the player. So make sure the firmware heap has room b
 
 ### Diagnostic apps
 
-**Task monitor** (`sdk/apps/taskmon`) lists the FreeRTOS tasks once a second through
-`rom_task_states` (the ROM's `uxTaskGetSystemState`).
+**Task monitor** (`sdk/apps/taskmon`) lists the FreeRTOS tasks once a second. A worker task
+takes the snapshot with `rom_task_states` (the ROM's `uxTaskGetSystemState`) and publishes it
+with a sequence count. The footer also shows the firmware heap and LVGL's UI heap
+(`lv_mem_monitor`, 0xD3904C: free, largest free block, lowest free while open).
 - **Task data:** each `fw_task_status_t` holds the name, number, state, current and base
   priority, run time and lowest free stack (in words). The kernel has 20 priority levels.
 - **CPU use:** run-time stats are on, counted by the low 32 bits of the hardware timer at
   0x40082104. A task's CPU use is its run time since the last snapshot over the total. "Busy" is
-  100% minus the `IDLE` task's share.
+  100% minus the `IDLE` task's share. Run time is only added when a task is switched out, so a
+  task that never yields shows 0%.
 - **Heap:** heap_4 keeps its size, free bytes and minimum free bytes at 0x800C74, 0x800C64 and
   0x800C68 (`FW_HEAP_SIZE`, `FW_HEAP_FREE`, `FW_HEAP_MIN_FREE`). `rom_heap_init` (0x9D28) sets
   them up.
 
-**Benchmark** (`sdk/apps/bench`) times, on the ROM's hardware timer from a task below the UI's
-priority:
+**Benchmark** (`sdk/apps/bench`) times, on the ROM's hardware timer from a low-priority worker
+task on CPU0:
 - the CPU clock, from the DWT cycle counter, or from the SysTick reload at 1 kHz if the counter
   doesn't run;
 - `memcpy`, a byte loop and `memset` over 8 KB buffers;
@@ -841,6 +913,12 @@ priority:
 - A pin is `port << 16 | pin << 11`; the low bits configure it in `rom_pin_config`.
 - Of the buttons, only Center (the power key) changes a GPIO pin. The others don't show up, so
   they must be read another way, most likely through the ADC (`/dev/kadc_ch1`).
+- `rom_gpio_get` is a plain register read, safe from UI code; the image is in a memory-only
+  worker.
+
+**Crash log** (`sdk/apps/crashlog`) shows the black box's state (see [Two cores](#two-cores)),
+turns `0:/bbstatus.txt` on and off (Up), and has two tests: holding Center makes the UI core
+fault, holding Up makes it hang. Both should leave a `0:/crashlog.txt` before the reset.
 
 ### Buttons and key events
 
@@ -948,11 +1026,13 @@ and 0xA3 and record code 0x92 from the table above.
 
 ## Gotchas
 
+- **App UI code runs on CPU1, without the kernel.** Kernel, FatFs and device calls from it freeze
+  the player at random; use workers (see [Two cores](#two-cores)).
 - **No writable globals in apps** (see [Writing a new app](#writing-a-new-app)).
 - **Center's KEY event comes on release**; use `LV_EVENT_PRESSED` for responsiveness.
 - **`LV_EVENT_DELETE` is 33** in this build (not 34).
 - **`fw_task_create`'s stack size is in words** (it goes straight to `xTaskCreate`), taken from
-  the firmware heap. The apps use 0x400 (4 KB) and count it when checking for free heap.
+  the firmware heap. Worker stacks are given the same way; the apps use 0x400 (4 KB).
 - **Keep the firmware heap from running out.** Its `oal_malloc` returns `printf`'s result
   instead of NULL on failure, and callers such as FatFs then write through that bad pointer.
 - **Images resized by `pack`** may be cropped or misplaced if the UI code hardcodes the original size.
@@ -962,8 +1042,8 @@ and 0xA3 and record code 0x92 from the table above.
 
 - What the 130 KB zero run inside FIRM is for, and FIRM header field +0x10.
 - Whether the vendor firmware ever writes to the free flash area (no problems seen so far).
-- What the ROM's reset path through the word at `0x30000600` is for (taken when `0x4000000C` is
-  non-zero).
+- What CPU1's entry at 0x80DA4F does before it runs the UI loop, and how the firmware passes the
+  UI loop to it (`FUN_00CD84BC`).
 - Most of the ROM's audio and Bluetooth functions are still unnamed.
 - Somewhere persistent to store app data (e.g. high scores) without globals: a free field in the
   `PSMP` settings, a spare pointer in the firmware's RAM, or a file on the SD card (`f_write` is

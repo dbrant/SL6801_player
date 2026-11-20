@@ -5,11 +5,10 @@
  * through the file, Up jumps ahead 1/16 of it, Center switches between hex and text, Back
  * returns to the list. Holding Back exits from anywhere.
  *
- * A task does all FatFs calls (the UI task must not touch the card): the UI writes a request into
- * the shared state, gives the task's semaphore, and shows the result once the task bumps
+ * A worker task on CPU0 does all FatFs calls (the UI runs on CPU1 and must not touch the card):
+ * the UI writes a request into the worker's memory, and shows the result once the task bumps
  * `finished`. Each read opens, seeks, reads and closes the file, so nothing stays open if the card
- * goes away. Folders are listed into a pool of names and sorted, folders first. Closing frees the
- * shared state from a UI timer once the task is done, as in sdk/src/mic.c.
+ * goes away. Folders are listed into a pool of names and sorted, folders first.
  *
  * Dmitry Brant, 2026
  */
@@ -21,10 +20,9 @@
 #define READ_SIZE 512
 #define TASK_PRIORITY 2
 #define TASK_STACK 0x400 /* words */
-#define HEAP_RESERVE 0x8000
 #define CALL_HEAP_MIN 0x2000 /* free heap needed before FatFs calls (each takes 0x460) */
+#define POLL_MS 5
 #define TICK_MS 50
-#define REAP_MS 20
 #define LINE_H 15
 #define ROWS 8
 #define LIST_Y LINE_H
@@ -69,14 +67,9 @@ typedef struct {
 	bool dir;
 } entry_t;
 
-/* Shared by the UI and the file task, on the firmware heap. The UI writes the request fields
- * only while the task is idle (req == REQ_NONE and !busy), and reads results only then. */
+/* The worker's memory, shared by the UI and the file task. The UI writes the request fields only
+ * while the task is idle (req == REQ_NONE and !busy), and reads results only then. */
 typedef struct {
-	void *task;
-	void *wake; /* given with a request or to stop */
-	volatile bool stop;
-	volatile bool done; /* set by the task as its last action */
-	uint8_t reap_ticks;
 	volatile uint8_t req;
 	volatile bool busy;
 	volatile uint32_t finished; /* bumped after each request */
@@ -101,7 +94,8 @@ typedef struct {
 
 typedef struct {
 	fw_overlay_t *ov;
-	fs_t *fs;
+	fw_worker_t *w;
+	fs_t *fs; /* the worker's memory, once it runs */
 	lv_timer_t *timer;
 	lv_obj_t *title, *footer, *bar, *names[ROWS], *sizes[ROWS], *hex, *text;
 	lv_img_dsc_t dsc;
@@ -177,10 +171,10 @@ static int read_file(fs_t *fs)
 	return r;
 }
 
-static void file_task(void *arg)
+static void file_task(fw_worker_t *w)
 {
-	fs_t *fs = arg;
-	while (!fs->stop) {
+	fs_t *fs = w->mem;
+	while (!w->stop) {
 		uint8_t req = fs->req;
 		if (req != REQ_NONE) {
 			fs->busy = true;
@@ -195,40 +189,8 @@ static void file_task(void *arg)
 			__sync_synchronize();
 			fs->finished++;
 		}
-		fw_sem_take(&fs->wake, -1);
+		fw_os_sleep(POLL_MS);
 	}
-	fs->done = true;
-}
-
-/* UI timer: frees the shared state once the task is done (see fw_mic_close). */
-static void reap(lv_timer_t *t)
-{
-	fs_t *fs = t->user_data;
-	if (!fs->done || fs->reap_ticks++ == 0)
-		return;
-	fw_task_join(fs->task);
-	fw_sem_delete(&fs->wake);
-	fw_os_free(fs);
-	lv_timer_del(t);
-}
-
-static fs_t *start_task(void)
-{
-	if (fw_os_heap_free() < sizeof(fs_t) + TASK_STACK * 4 + HEAP_RESERVE)
-		return NULL;
-	fs_t *fs = fw_os_calloc(1, sizeof(fs_t));
-	if (!fw_is_ram(fs))
-		return NULL;
-	fw_put_str(fs->dir_path, "0:/");
-	fs->wake = fw_sem_create();
-	if (fw_is_ram(fs->wake)) {
-		fs->task = fw_task_create(file_task, fs, "files", TASK_PRIORITY, TASK_STACK);
-		if (fw_is_ram(fs->task))
-			return fs;
-		fw_sem_delete(&fs->wake);
-	}
-	fw_os_free(fs);
-	return NULL;
 }
 
 /* ---------------------------------------------------------------- helpers */
@@ -452,7 +414,6 @@ static void request(app_t *app, uint8_t req)
 	app->waiting = true;
 	__sync_synchronize();
 	app->fs->req = req;
-	fw_sem_give(&app->fs->wake);
 	lv_label_set_text(app->footer, "Reading...");
 }
 
@@ -499,6 +460,16 @@ static bool path_up(char *path, char *last)
 static void tick(lv_timer_t *t)
 {
 	app_t *app = t->user_data;
+	if (!app->fs) {
+		app->fs = fw_worker_mem(app->w);
+		if (app->fs) {
+			fw_put_str(app->fs->dir_path, "0:/");
+			request_list(app);
+		} else if (fw_worker_failed(app->w)) {
+			lv_label_set_text(app->footer, "Out of memory");
+		}
+		return;
+	}
 	fs_t *fs = app->fs;
 	if (!app->waiting || fs->busy || fs->req != REQ_NONE || fs->finished == app->seen)
 		return;
@@ -610,12 +581,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
-	fs_t *fs = app->fs;
-	if (fs) {
-		fs->stop = true;
-		fw_sem_give(&fs->wake);
-		lv_timer_create(reap, REAP_MS, fs); /* if this fails, fs and the task stay allocated */
-	}
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -684,13 +650,12 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 	set_mode(app, MODE_LIST);
 
-	app->fs = start_task();
-	if (!app->fs) {
-		lv_label_set_text(app->footer, "Out of memory");
+	app->w = fw_worker_start(file_task, sizeof(fs_t), "files", TASK_PRIORITY, TASK_STACK);
+	if (!app->w) {
+		lv_label_set_text(app->footer, "Busy, try again");
 		return;
 	}
 	app->timer = lv_timer_create(tick, TICK_MS, app);
-	request_list(app);
 }
 
 FW_MENU_ITEM(FW_SYMBOL_BARS, "Files", open);

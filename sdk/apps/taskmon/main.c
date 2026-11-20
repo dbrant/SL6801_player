@@ -1,11 +1,13 @@
 /*
  * "Task monitor" entry in the APP menu: the FreeRTOS tasks with their priority, state, lowest free
- * stack and CPU use over the last second, plus the heap. Up changes the sort column (highlighted),
- * Left/Right page through the list, Back exits.
+ * stack and CPU use over the last second, plus the firmware heap and LVGL's UI heap ("blk" is its
+ * largest free block, "min" the lowest free seen while open). Up changes the sort column
+ * (highlighted), Left/Right page through the list, Back exits.
  *
- * Once a second the UI task takes a snapshot with the ROM kernel's uxTaskGetSystemState. CPU use
- * is each task's run time since the previous snapshot over the total; run times count the
- * hardware timer. Names are copied right away, since a task may be deleted after the snapshot.
+ * The kernel runs on CPU0 and the UI on CPU1, so a worker task on CPU0 takes a snapshot with the
+ * ROM kernel's uxTaskGetSystemState once a second, copying the names right away (a task may be
+ * deleted afterwards), and publishes it with a sequence count the UI checks. CPU use is each
+ * task's run time since the previous snapshot over the total; run times count the hardware timer.
  *
  * Dmitry Brant, 2026
  */
@@ -13,9 +15,13 @@
 
 #define MAX_TASKS 40
 #define NAME_LEN 8
-#define ROWS 7
+#define ROWS 6
 #define LINE_H 15 /* the UI font's line height */
 #define SAMPLE_MS 1000
+#define STOP_POLL_MS 50
+#define TICK_MS 250
+#define TASK_PRIORITY 2
+#define TASK_STACK 0x200 /* words */
 #define NO_CPU 0xFFFF
 
 enum { COL_NAME, COL_PRIO, COL_STATE, COL_STACK, COL_CPU, COLS };
@@ -44,18 +50,78 @@ typedef struct {
 } row_t;
 
 typedef struct {
+	void *handle;
+	char name[NAME_LEN + 1];
+	uint8_t prio, state;
+	uint16_t stack_free; /* words */
+	uint32_t run_time;
+} task_t;
+
+/* The worker's memory: the latest snapshot, written by the task. */
+typedef struct {
+	volatile uint32_t seq; /* odd while the task writes; bumped twice per snapshot */
+	uint32_t total, count; /* count 0: too many tasks */
+	task_t task[MAX_TASKS];
+	fw_task_status_t st[MAX_TASKS]; /* the task's scratch */
+} snap_t;
+
+typedef struct {
 	fw_overlay_t *ov;
+	fw_worker_t *w;
 	lv_timer_t *timer;
-	lv_obj_t *head[COLS], *col[COLS], *summary, *heap;
+	lv_obj_t *head[COLS], *col[COLS], *summary, *heap, *ui_heap;
 	uint8_t sort, page, count;
 	bool have_prev;
+	uint32_t seen; /* snap->seq when last shown */
 	uint32_t prev_total;
 	uint8_t prev_count;
+	uint32_t ui_min;
 	void *prev_handle[MAX_TASKS];
 	uint32_t prev_run[MAX_TASKS];
-	fw_task_status_t st[MAX_TASKS];
+	task_t copy[MAX_TASKS];
 	row_t rows[MAX_TASKS];
 } app_t;
+
+/* ---------------------------------------------------------------- sampling task (CPU0) */
+
+static void take_snapshot(snap_t *s)
+{
+	uint32_t total = 0;
+	uint32_t n = rom_task_states(s->st, MAX_TASKS, &total);
+	s->seq++;
+	__sync_synchronize();
+	s->total = total;
+	s->count = n;
+	for (uint32_t i = 0; i < n; i++) {
+		const fw_task_status_t *st = &s->st[i];
+		task_t *t = &s->task[i];
+		int k = 0;
+		while (k < NAME_LEN && st->name[k]) {
+			t->name[k] = st->name[k];
+			k++;
+		}
+		t->name[k] = 0;
+		t->handle = st->handle;
+		t->prio = (uint8_t)st->priority;
+		t->state = st->state;
+		t->stack_free = st->stack_free;
+		t->run_time = st->run_time;
+	}
+	__sync_synchronize();
+	s->seq++;
+}
+
+static void sample_task(fw_worker_t *w)
+{
+	snap_t *s = w->mem;
+	while (!w->stop) {
+		take_snapshot(s);
+		for (int ms = 0; ms < SAMPLE_MS && !w->stop; ms += STOP_POLL_MS)
+			fw_os_sleep(STOP_POLL_MS);
+	}
+}
+
+/* ---------------------------------------------------------------- UI */
 
 static int by_prio(const void *a, const void *b)
 {
@@ -135,6 +201,17 @@ static void show_summary(app_t *app, int busy)
 	p = fw_put_str(p, ", min ");
 	put_kb(p, FW_HEAP_MIN_FREE);
 	lv_label_set_text(app->heap, text);
+	lv_mem_monitor_t mon;
+	lv_mem_monitor(&mon);
+	if (mon.free_size < app->ui_min)
+		app->ui_min = mon.free_size;
+	p = fw_put_str(text, "UI ");
+	p = put_kb(p, mon.free_size);
+	p = fw_put_str(p, ", blk ");
+	p = put_kb(p, mon.free_biggest_size);
+	p = fw_put_str(p, ", min ");
+	put_kb(p, app->ui_min);
+	lv_label_set_text(app->ui_heap, text);
 }
 
 static void sort_rows(app_t *app)
@@ -143,27 +220,42 @@ static void sort_rows(app_t *app)
 	rom_qsort(app->rows, app->count, sizeof(row_t), cmp[app->sort]);
 }
 
-/* Takes a snapshot, computes CPU use against the previous one, and shows it. */
+/* Copies the worker's latest snapshot if it is new and complete; returns its task count, else 0. */
+static uint32_t copy_snapshot(app_t *app, uint32_t *total)
+{
+	const snap_t *s = fw_worker_mem(app->w);
+	if (!s)
+		return 0;
+	uint32_t seq = s->seq;
+	if (seq == app->seen || seq & 1)
+		return 0;
+	__sync_synchronize();
+	uint32_t n = s->count < MAX_TASKS ? s->count : MAX_TASKS;
+	*total = s->total;
+	memcpy(app->copy, s->task, n * sizeof(task_t));
+	__sync_synchronize();
+	if (s->seq != seq)
+		return 0; /* written meanwhile: try again next tick */
+	app->seen = seq;
+	if (!n)
+		lv_label_set_text(app->summary, "Too many tasks");
+	return n;
+}
+
+/* Shows a new snapshot, with CPU use against the previous one. */
 static void sample(app_t *app)
 {
 	uint32_t total = 0;
-	uint32_t n = rom_task_states(app->st, MAX_TASKS, &total);
-	if (n == 0) {
-		lv_label_set_text(app->summary, "Too many tasks");
+	uint32_t n = copy_snapshot(app, &total);
+	if (n == 0)
 		return;
-	}
 	uint32_t dt = total - app->prev_total;
 	int busy = -1;
 	for (uint32_t i = 0; i < n; i++) {
-		const fw_task_status_t *s = &app->st[i];
+		const task_t *s = &app->copy[i];
 		row_t *r = &app->rows[i];
-		int k = 0;
-		while (k < NAME_LEN && s->name[k]) {
-			r->name[k] = s->name[k];
-			k++;
-		}
-		r->name[k] = 0;
-		r->prio = (uint8_t)s->priority;
+		memcpy(r->name, s->name, sizeof(r->name));
+		r->prio = s->prio;
 		r->state = s->state;
 		r->stack = s->stack_free * 4u;
 		r->cpu = NO_CPU;
@@ -177,8 +269,8 @@ static void sample(app_t *app)
 			busy = 100 - r->cpu;
 	}
 	for (uint32_t i = 0; i < n; i++) {
-		app->prev_handle[i] = app->st[i].handle;
-		app->prev_run[i] = app->st[i].run_time;
+		app->prev_handle[i] = app->copy[i].handle;
+		app->prev_run[i] = app->copy[i].run_time;
 	}
 	app->prev_count = (uint8_t)n;
 	app->prev_total = total;
@@ -191,7 +283,12 @@ static void sample(app_t *app)
 
 static void tick(lv_timer_t *t)
 {
-	sample(t->user_data);
+	app_t *app = t->user_data;
+	if (fw_worker_failed(app->w)) {
+		lv_label_set_text(app->summary, "Out of memory");
+		return;
+	}
+	sample(app);
 }
 
 static void on_delete(void *ctx)
@@ -199,6 +296,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -247,6 +345,7 @@ static void open(lv_obj_t *return_focus)
 	if (!app)
 		return;
 	memset(app, 0, sizeof(*app));
+	app->ui_min = UINT32_MAX;
 	app->ov = fw_overlay_open(return_focus, lv_rgb(0, 0, 0), on_delete, app);
 	if (!app->ov) {
 		lv_mem_free(app);
@@ -260,13 +359,19 @@ static void open(lv_obj_t *return_focus)
 		app->col[c] = column_label(root, c, LINE_H, lv_rgb(0xFF, 0xFF, 0xFF));
 	}
 	app->summary = fw_label(root, "", lv_rgb(0xC0, 0xC8, 0xD0));
-	lv_obj_set_pos(app->summary, 2, (lv_coord_t)(h - 2 * LINE_H));
+	lv_obj_set_pos(app->summary, 2, (lv_coord_t)(h - 3 * LINE_H));
 	app->heap = fw_label(root, "", lv_rgb(0xC0, 0xC8, 0xD0));
-	lv_obj_set_pos(app->heap, 2, (lv_coord_t)(h - LINE_H));
+	lv_obj_set_pos(app->heap, 2, (lv_coord_t)(h - 2 * LINE_H));
+	app->ui_heap = fw_label(root, "", lv_rgb(0xC0, 0xC8, 0xD0));
+	lv_obj_set_pos(app->ui_heap, 2, (lv_coord_t)(h - LINE_H));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	sample(app);
-	app->timer = lv_timer_create(tick, SAMPLE_MS, app);
+	app->w = fw_worker_start(sample_task, sizeof(snap_t), "taskmon", TASK_PRIORITY, TASK_STACK);
+	if (!app->w) {
+		lv_label_set_text(app->summary, "Busy, try again");
+		return;
+	}
+	app->timer = lv_timer_create(tick, TICK_MS, app);
 }
 
 FW_MENU_ITEM(FW_SYMBOL_BARS, "Task monitor", open);

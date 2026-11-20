@@ -19,7 +19,7 @@ static uint32_t focused_flags(void)
 
 /*
  * Runs in the key manager's task (FUN_00CDD5C0) in place of its "keys ready" check, with the raw
- * event it is about to decode. Only reads LVGL state, since this is not the UI task.
+ * event it is about to decode, on CPU0. Only reads LVGL state, which belongs to the UI on CPU1.
  * - The key manager treats a long Center press as the power key and powers off (or turns the
  *   screen off). With FW_OBJ_FLAG_CENTER_LONG on the focused object, the event becomes a Center
  *   long start instead, which the keypad driver reports as FW_KEY_CENTER_LONG.

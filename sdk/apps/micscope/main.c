@@ -116,6 +116,12 @@ static void update_labels(app_t *app)
 static void tick(lv_timer_t *t)
 {
 	app_t *app = t->user_data;
+	if (fw_mic_failed(app->mic)) {
+		lv_label_set_text(app->stats, "Mic unavailable");
+		lv_timer_del(t);
+		app->timer = NULL;
+		return;
+	}
 	if (app->frozen)
 		return;
 	if (fw_mic_latest(app->mic, app->samples, FRAMES) < FRAMES)

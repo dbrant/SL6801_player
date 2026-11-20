@@ -7,11 +7,10 @@
  * cosf) and draws its edges into an indexed image, the far ones dimmer. The status shows how long
  * that took, timed with the ROM's 64-bit hardware timer.
  *
- * The check: a task below the UI task's priority keeps repeating a calculation that holds 16
+ * The check: a low-priority worker task on CPU0 keeps repeating a calculation that holds 16
  * floats across calls (so they live in s16-s31, which only the task switch saves) and also runs
  * double and 64-bit integer math through the ROM's helpers. Each result must match the one the
- * UI task computed when the app opened; the UI task's own float work preempts the task often.
- * Closing frees the task's state from a UI timer once it is done, as in sdk/src/mic.c.
+ * UI (on CPU1) computed when the app opened; the tick and other tasks preempt the task often.
  *
  * Dmitry Brant, 2026
  */
@@ -35,9 +34,8 @@
 #define STATS_TICKS 15
 #define CHECK_PRIORITY 2
 #define CHECK_STACK 0x400 /* words */
-#define CHECK_ITERS 2000 /* about 1-2 ms per run, so ticks and the UI task interrupt it */
+#define CHECK_ITERS 2000 /* about 1-2 ms per run, so ticks and other tasks interrupt it */
 #define CHECK_PAUSE_MS 2
-#define REAP_MS 20
 
 enum { PAL_BG, PAL_BACK, PAL_FRONT, PAL_VERTEX };
 enum { SHAPE_CUBE, SHAPE_OCTAHEDRON, SHAPE_ICOSAHEDRON, SHAPE_TORUS, SHAPES };
@@ -45,13 +43,9 @@ enum { SHAPE_CUBE, SHAPE_OCTAHEDRON, SHAPE_ICOSAHEDRON, SHAPE_TORUS, SHAPES };
 static const char *const shape_names[SHAPES] = {"Cube", "Octahedron", "Icosahedron", "Torus"};
 static const uint8_t palette_rgb[4][3] = {{0x04, 0x08, 0x14}, {0x28, 0x48, 0x78}, {0x80, 0xE0, 0xFF}, {0xFF, 0xC0, 0x40}};
 
-/* Shared by the UI and the check task, on the firmware heap. */
+/* The worker's memory, shared by the UI and the check task. */
 typedef struct {
-	void *task;
-	void *wake; /* given to stop the task early */
-	volatile bool stop;
-	volatile bool done; /* set by the task as its last action */
-	uint8_t reap_ticks;
+	volatile bool armed; /* set by the UI once the seeds and expected are in */
 	float seed[16];
 	double dseed;
 	uint64_t useed;
@@ -61,7 +55,8 @@ typedef struct {
 
 typedef struct {
 	fw_overlay_t *ov;
-	check_t *check;
+	fw_worker_t *w;
+	check_t *check; /* the worker's memory, once armed */
 	lv_timer_t *timer;
 	lv_obj_t *img, *info, *timing, *status;
 	lv_img_dsc_t dsc;
@@ -95,7 +90,7 @@ static uint32_t float_bits(float f)
 
 /* Deterministic float, double and 64-bit integer work on c's seeds, hashed. The rom_sinf call in
  * the loop makes the 16 accumulators live across a call, so they sit in s16-s31. Not inlined, so
- * the UI task and the check task run the same code. */
+ * the UI and the check task run the same code. */
 static __attribute__((noinline)) uint32_t check_work(const check_t *c)
 {
 	float a0 = c->seed[0], a1 = c->seed[1], a2 = c->seed[2], a3 = c->seed[3];
@@ -124,50 +119,30 @@ static __attribute__((noinline)) uint32_t check_work(const check_t *c)
 	return hash * 31 + (uint32_t)d;
 }
 
-static void check_task(void *arg)
+static void check_task(fw_worker_t *w)
 {
-	check_t *c = arg;
-	while (!c->stop) {
+	check_t *c = w->mem;
+	while (!w->stop && !c->armed)
+		fw_os_sleep(CHECK_PAUSE_MS);
+	__sync_synchronize();
+	while (!w->stop) {
 		if (check_work(c) != c->expected)
 			c->errors++;
 		c->runs++;
-		fw_sem_take(&c->wake, CHECK_PAUSE_MS);
+		fw_os_sleep(CHECK_PAUSE_MS);
 	}
-	c->done = true;
 }
 
-/* UI timer: frees the check state once the task is done (see fw_mic_close). */
-static void reap(lv_timer_t *t)
+/* Seeds the check and computes the expected result here on the UI's core; the task then starts. */
+static void arm_check(check_t *c)
 {
-	check_t *c = t->user_data;
-	if (!c->done || c->reap_ticks++ == 0)
-		return;
-	fw_task_join(c->task);
-	fw_sem_delete(&c->wake);
-	fw_os_free(c);
-	lv_timer_del(t);
-}
-
-/* Seeds the check, computes the expected result in this (the UI) task, and starts the task. */
-static check_t *start_check(void)
-{
-	check_t *c = fw_os_calloc(1, sizeof(check_t));
-	if (!fw_is_ram(c))
-		return NULL;
 	for (int k = 0; k < 16; k++)
 		c->seed[k] = (float)(k + 1) * 0.03125f;
 	c->dseed = 1.5;
 	c->useed = 0x0123456789ABCDEFull;
 	c->expected = check_work(c);
-	c->wake = fw_sem_create();
-	if (fw_is_ram(c->wake)) {
-		c->task = fw_task_create(check_task, c, "fpucheck", CHECK_PRIORITY, CHECK_STACK);
-		if (fw_is_ram(c->task))
-			return c;
-		fw_sem_delete(&c->wake);
-	}
-	fw_os_free(c);
-	return NULL;
+	__sync_synchronize();
+	c->armed = true;
 }
 
 /* ---------------------------------------------------------------- shapes */
@@ -359,8 +334,16 @@ static void update_stats(app_t *app)
 		app->frames = 0;
 	}
 	check_t *c = app->check;
-	if (!c)
+	if (!c) {
+		c = fw_worker_mem(app->w);
+		if (c) {
+			arm_check(c);
+			app->check = c;
+		} else if (fw_worker_failed(app->w)) {
+			lv_label_set_text(app->status, "FPU check: out of memory");
+		}
 		return;
+	}
 	uint32_t runs = c->runs, errors = c->errors;
 	char *p;
 	if (errors) {
@@ -403,12 +386,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
-	check_t *c = app->check;
-	if (c) {
-		c->stop = true;
-		fw_sem_give(&c->wake);
-		lv_timer_create(reap, REAP_MS, c); /* if this fails, c and the task stay allocated */
-	}
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -481,9 +459,9 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_set_pos(app->status, 2, (lv_coord_t)(h - LINE_H + 1));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	app->check = start_check();
-	if (!app->check)
-		lv_label_set_text(app->status, "FPU check: out of memory");
+	app->w = fw_worker_start(check_task, sizeof(check_t), "fpucheck", CHECK_PRIORITY, CHECK_STACK);
+	if (!app->w)
+		lv_label_set_text(app->status, "FPU check: busy");
 	build_shape(app);
 	update_info(app);
 	app->last_tick = lv_tick_get();

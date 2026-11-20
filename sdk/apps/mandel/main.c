@@ -4,10 +4,9 @@
  * holding Center zooms out, holding Back exits. Colors cycle blue, green, red, blue with the
  * escape iteration; points in the set are black.
  *
- * A task renders the view into an indexed image, first in 4x4 blocks and then per pixel, and
- * starts over when the view changes; a UI timer redraws the image as rows come in. The task runs
- * below the UI task's priority (3) and sleeps 1 ms after each row. Closing frees the state from a
- * UI timer once the task is done, as in sdk/src/mic.c.
+ * A worker task on CPU0 renders the view into an indexed image in the worker's memory, first in
+ * 4x4 blocks and then per pixel, and starts over when the view changes; a UI timer redraws the
+ * image as rows come in. The task sleeps 1 ms after each row.
  *
  * The math is 32-bit fixed point with 28 fraction bits (no floating point is linked), which
  * allows 16 zoom levels (65536x) before pixels get close to the precision.
@@ -34,16 +33,10 @@
 #define TASK_PRIORITY 2
 #define TASK_STACK 0x400 /* words */
 #define ROW_PAUSE_MS 1
-#define HEAP_RESERVE 0x8000
-#define REAP_MS 20
+#define IDLE_POLL_MS 10
 
-/* Shared by the UI and the render task, on the firmware heap. */
+/* The worker's memory, shared by the UI and the render task. */
 typedef struct {
-	void *task;
-	void *wake; /* given when the view changes or to stop */
-	volatile bool stop;
-	volatile bool done; /* set by the task as its last action */
-	uint8_t reap_ticks;
 	volatile int32_t cx, cy, step; /* view center and pixel size, written by the UI */
 	volatile uint16_t max_iter;
 	volatile uint32_t view;     /* bumped by the UI after changing the view */
@@ -53,7 +46,8 @@ typedef struct {
 
 typedef struct {
 	fw_overlay_t *ov;
-	render_t *r;
+	fw_worker_t *w;
+	render_t *r; /* the worker's memory, once it runs */
 	lv_timer_t *timer;
 	lv_obj_t *img, *status;
 	lv_img_dsc_t dsc;
@@ -103,7 +97,7 @@ static uint8_t point_color(int32_t cr, int32_t ci, int max_iter)
 
 /* Renders the view in blocks of size x size pixels; false if the view changed or the task is
  * stopping. */
-static bool render_pass(render_t *r, uint32_t view, int size)
+static bool render_pass(fw_worker_t *w, render_t *r, uint32_t view, int size)
 {
 	int32_t cx = r->cx, cy = r->cy, step = r->step;
 	int max_iter = r->max_iter;
@@ -116,39 +110,26 @@ static bool render_pass(render_t *r, uint32_t view, int size)
 				memset(px + (y + dy) * IMG_W + x, c, (size_t)size);
 		}
 		r->progress++;
-		fw_sem_take(&r->wake, ROW_PAUSE_MS);
-		if (r->stop || r->view != view)
+		fw_os_sleep(ROW_PAUSE_MS);
+		if (w->stop || r->view != view)
 			return false;
 	}
 	return true;
 }
 
-static void render_task(void *arg)
+static void render_task(fw_worker_t *w)
 {
-	render_t *r = arg;
+	render_t *r = w->mem;
 	uint32_t view = 0; /* the UI's first set_view makes it 1 */
-	while (!r->stop) {
+	while (!w->stop) {
 		if (r->view == view) {
-			fw_sem_take(&r->wake, -1);
+			fw_os_sleep(IDLE_POLL_MS);
 			continue;
 		}
 		view = r->view;
-		if (render_pass(r, view, 4))
-			render_pass(r, view, 1);
+		if (render_pass(w, r, view, 4))
+			render_pass(w, r, view, 1);
 	}
-	r->done = true;
-}
-
-/* UI timer: frees the shared state once the task is done (see fw_mic_close). */
-static void reap(lv_timer_t *t)
-{
-	render_t *r = t->user_data;
-	if (!r->done || r->reap_ticks++ == 0)
-		return;
-	fw_task_join(r->task);
-	fw_sem_delete(&r->wake);
-	fw_os_free(r);
-	lv_timer_del(t);
 }
 
 /* ---------------------------------------------------------------- UI */
@@ -163,7 +144,6 @@ static void set_view(app_t *app)
 	r->max_iter = (uint16_t)(iter < MAX_ITER ? iter : MAX_ITER);
 	__sync_synchronize();
 	r->view++;
-	fw_sem_give(&r->wake);
 
 	char text[32];
 	char *p = fw_put_str(text, "Zoom ");
@@ -179,9 +159,31 @@ static int32_t clamp_center(int32_t v)
 	return v > LIMIT ? LIMIT : v < -LIMIT ? -LIMIT : v;
 }
 
+/* Shows the image once the worker runs. */
+static void start_view(app_t *app)
+{
+	render_t *r = app->r;
+	set_palette(r->px);
+	app->dsc.header = LV_IMG_HEADER(LV_IMG_CF_INDEXED_8BIT, IMG_W, IMG_H);
+	app->dsc.data_size = sizeof(r->px);
+	app->dsc.data = r->px;
+	app->img = lv_img_create(app->ov->root);
+	lv_img_set_src(app->img, &app->dsc);
+	lv_obj_set_pos(app->img, 0, 0);
+	set_view(app);
+}
+
 static void tick(lv_timer_t *t)
 {
 	app_t *app = t->user_data;
+	if (!app->r) {
+		app->r = fw_worker_mem(app->w);
+		if (app->r)
+			start_view(app);
+		else if (fw_worker_failed(app->w))
+			lv_label_set_text(app->status, "Out of memory");
+		return;
+	}
 	uint32_t progress = app->r->progress;
 	if (progress != app->drawn) {
 		app->drawn = progress;
@@ -194,12 +196,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
-	render_t *r = app->r;
-	if (r) {
-		r->stop = true;
-		fw_sem_give(&r->wake);
-		lv_timer_create(reap, REAP_MS, r); /* if this fails, r and the task stay allocated */
-	}
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -250,26 +247,6 @@ static void key_cb(lv_event_t *e)
 	set_view(app);
 }
 
-/* Allocates the shared state and starts the render task; NULL on failure. */
-static render_t *start_render(void)
-{
-	if (fw_os_heap_free() < sizeof(render_t) + TASK_STACK * 4 + HEAP_RESERVE)
-		return NULL;
-	render_t *r = fw_os_calloc(1, sizeof(render_t));
-	if (!fw_is_ram(r))
-		return NULL;
-	set_palette(r->px);
-	r->wake = fw_sem_create();
-	if (fw_is_ram(r->wake)) {
-		r->task = fw_task_create(render_task, r, "mandel", TASK_PRIORITY, TASK_STACK);
-		if (fw_is_ram(r->task))
-			return r;
-		fw_sem_delete(&r->wake);
-	}
-	fw_os_free(r);
-	return NULL;
-}
-
 static void open(lv_obj_t *return_focus)
 {
 	app_t *app = lv_mem_alloc(sizeof(app_t));
@@ -288,18 +265,11 @@ static void open(lv_obj_t *return_focus)
 	lv_obj_set_pos(app->status, 2, (lv_coord_t)(h - BAR_H + 1));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	app->r = start_render();
-	if (!app->r) {
-		lv_label_set_text(app->status, "Out of memory");
+	app->w = fw_worker_start(render_task, sizeof(render_t), "mandel", TASK_PRIORITY, TASK_STACK);
+	if (!app->w) {
+		lv_label_set_text(app->status, "Busy, try again");
 		return;
 	}
-	app->dsc.header = LV_IMG_HEADER(LV_IMG_CF_INDEXED_8BIT, IMG_W, IMG_H);
-	app->dsc.data_size = sizeof(app->r->px);
-	app->dsc.data = app->r->px;
-	app->img = lv_img_create(root);
-	lv_img_set_src(app->img, &app->dsc);
-	lv_obj_set_pos(app->img, 0, 0);
-	set_view(app);
 	app->timer = lv_timer_create(tick, TICK_MS, app);
 }
 

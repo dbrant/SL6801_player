@@ -1,13 +1,10 @@
 /*
- * Sound effects on /dev/audio0: a small tone synthesizer running in its own task.
- *
- * The UI task must not touch /dev/audio0: opening, writing to or closing it from LVGL timers or
- * events hangs or reboots the player, often but not always. So the sound task owns the device,
- * as the music player's task does: it opens it (with the video player's amplifier callback),
- * keeps the ring full with blocking writes, and on stop plays the ring out and closes it.
- * fw_sound_play hands requests to the task through a small single-producer queue, and
- * fw_sound_close only signals the task; a UI timer joins it once it is done (which then does not
- * block) and frees the state. The state lives on the firmware heap, not the 40 KB LVGL heap.
+ * Sound effects on /dev/audio0: a small tone synthesizer running in a worker task on CPU0 (the UI
+ * runs on CPU1 and must not touch devices; see "the two cores" in sdk.h). The task owns the
+ * device, as the music player's task does: it opens it (with the video player's amplifier
+ * callback), keeps the ring full with blocking writes, and on stop plays the ring out and closes
+ * it. fw_sound_play hands requests to the task through a small single-producer queue in the
+ * worker's memory; until the worker is running they are dropped.
  */
 #include "sdk.h"
 
@@ -21,9 +18,7 @@
 #define REQUESTS 8          /* power of two */
 #define INC_PER_HZ 97392u   /* phase increment for 1 Hz: 2^32 / 44100 */
 #define ATTACK 64           /* samples of fade-in, avoids clicks */
-#define HEAP_RESERVE 0x8000 /* leave this much of the firmware heap for the firmware */
 #define DRAIN_TIMEOUT_MS 300 /* the ring holds about 46 ms */
-#define REAP_MS 20
 
 typedef struct {
 	const fw_tone_t *tone;
@@ -40,20 +35,17 @@ typedef struct {
 	uint8_t count;
 } request_t;
 
-struct fw_sound {
+/* The worker's memory. */
+typedef struct {
 	void *dev;
 	void *gain;
-	void *task;
-	void *stop;
-	volatile bool done; /* set by the task as its last action */
-	uint8_t reap_ticks;
 	request_t req[REQUESTS];
 	volatile uint8_t req_head; /* written by fw_sound_play */
 	volatile uint8_t req_tail; /* written by the task */
 	uint32_t serial, lfsr;
 	voice_t voice[VOICES];
 	int16_t buf[PERIOD * 2] __attribute__((aligned(4))); /* for the ROM's word copies */
-};
+} sound_t;
 
 static void start_tone(voice_t *v)
 {
@@ -67,7 +59,7 @@ static void start_tone(voice_t *v)
 	v->amp = (uint32_t)t->vol * 48;
 }
 
-static void start_voice(fw_sound_t *s, const fw_tone_t *tones, uint8_t count)
+static void start_voice(sound_t *s, const fw_tone_t *tones, uint8_t count)
 {
 	voice_t *v = &s->voice[0];
 	for (int k = 0; k < VOICES; k++) { /* an idle voice, else the oldest */
@@ -86,7 +78,7 @@ static void start_voice(fw_sound_t *s, const fw_tone_t *tones, uint8_t count)
 	start_tone(v);
 }
 
-static void take_requests(fw_sound_t *s)
+static void take_requests(sound_t *s)
 {
 	while (s->req_tail != s->req_head) {
 		__sync_synchronize();
@@ -104,7 +96,7 @@ static int16_t clamp16(int32_t x)
 
 /* Starts queued sounds, mixes all voices into the first PERIOD samples of s->buf, then expands
  * them to stereo in place. */
-static void render(fw_sound_t *s)
+static void render(sound_t *s)
 {
 	take_requests(s);
 	int16_t *out = s->buf;
@@ -154,7 +146,7 @@ static void render(fw_sound_t *s)
 }
 
 /* Plays the ring out, then closes the device. */
-static void close_device(fw_sound_t *s)
+static void close_device(sound_t *s)
 {
 	/* Overwrite the whole ring with silence: closing the device plays one more period of it. */
 	memset(s->buf, 0, sizeof(s->buf));
@@ -170,14 +162,21 @@ static void close_device(fw_sound_t *s)
 	fw_dev_close(&s->dev);
 }
 
-/* Owns the device from open to close; see the top of this file. */
-static void sound_task(void *arg)
+/* Owns the device from open to close; see the top of this file. Returns at once when the device
+ * is busy (e.g. the music player has it). */
+static void sound_task(fw_worker_t *w)
 {
-	fw_sound_t *s = arg;
+	sound_t *s = w->mem;
+	if (fw_dev_busy(AUDIO_DEV))
+		return;
+	s->lfsr = 0x2545F491u;
+	s->gain = fw_gain_create(0, RATE, 2, 2);
+	if (!fw_is_ram(s->gain))
+		s->gain = NULL;
 	static const uint32_t params[10] = {2, 2, RATE, PERIOD, PERIODS, 0, 0, 0, FW_AUDIO_PA_CB, 0};
 	s->dev = fw_dev_open(AUDIO_DEV, 0, params);
 	if (s->dev) {
-		while (fw_sem_take(&s->stop, 0) == -1) {
+		while (!w->stop) {
 			render(s);
 			if (s->gain)
 				fw_gain_apply(s->gain, fw_audio_volume() & 0xFF, s->buf, PERIOD);
@@ -185,45 +184,18 @@ static void sound_task(void *arg)
 		}
 		close_device(s);
 	}
-	s->done = true;
-}
-
-static void release(fw_sound_t *s)
-{
 	if (s->gain)
 		fw_gain_free(s->gain);
-	if (s->stop)
-		fw_sem_delete(&s->stop);
-	fw_os_free(s);
 }
 
 fw_sound_t *fw_sound_open(void)
 {
-	if (fw_dev_busy(AUDIO_DEV) || fw_os_heap_free() < sizeof(fw_sound_t) + TASK_STACK * 4 + HEAP_RESERVE)
-		return NULL;
-	fw_sound_t *s = fw_os_calloc(1, sizeof(*s));
-	if (!fw_is_ram(s))
-		return NULL;
-	s->lfsr = 0x2545F491u;
-	s->gain = fw_gain_create(0, RATE, 2, 2);
-	if (!fw_is_ram(s->gain))
-		s->gain = NULL;
-	s->stop = fw_sem_create();
-	if (!fw_is_ram(s->stop)) {
-		s->stop = NULL;
-		release(s);
-		return NULL;
-	}
-	s->task = fw_task_create(sound_task, s, "sfx", TASK_PRIORITY, TASK_STACK);
-	if (!fw_is_ram(s->task)) {
-		release(s);
-		return NULL;
-	}
-	return s;
+	return fw_worker_start(sound_task, sizeof(sound_t), "sfx", TASK_PRIORITY, TASK_STACK);
 }
 
-void fw_sound_play(fw_sound_t *s, const fw_tone_t *tones, uint8_t count)
+void fw_sound_play(fw_sound_t *snd, const fw_tone_t *tones, uint8_t count)
 {
+	sound_t *s = fw_worker_mem(snd);
 	if (!s || !count)
 		return;
 	uint8_t next = (uint8_t)((s->req_head + 1) & (REQUESTS - 1));
@@ -235,22 +207,7 @@ void fw_sound_play(fw_sound_t *s, const fw_tone_t *tones, uint8_t count)
 	s->req_head = next;
 }
 
-/* UI timer: finishes closing once the task is done. It joins one tick after seeing done, when the
- * task has long returned, so the join does not block. */
-static void reap(lv_timer_t *t)
+void fw_sound_close(fw_sound_t *snd)
 {
-	fw_sound_t *s = t->user_data;
-	if (!s->done || s->reap_ticks++ == 0)
-		return;
-	fw_task_join(s->task);
-	release(s);
-	lv_timer_del(t);
-}
-
-void fw_sound_close(fw_sound_t *s)
-{
-	if (!s)
-		return;
-	fw_sem_give(&s->stop);
-	lv_timer_create(reap, REAP_MS, s); /* if this fails, s and the task stay allocated */
+	fw_worker_release(snd);
 }

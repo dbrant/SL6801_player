@@ -5,10 +5,9 @@
  * to red (8 bits per byte; random data reaches about 7.6). A read error shows white.
  * Left/Right page through the device (hold to repeat), Up jumps 1/16 of it ahead, Back exits.
  *
- * Reading the SD card from the UI task reboots the player after a few seconds, so a task reads
- * the requested page and stores a color per block; a UI timer draws the colors. Closing signals
- * the task, and a UI timer joins it once it is done and frees the shared state, as in
- * sdk/src/mic.c. The flash is memory mapped and read the same way, for simplicity.
+ * A worker task on CPU0 reads the requested page and stores a color per block (the UI runs on
+ * CPU1 and must not touch the card); a UI timer draws the colors. The flash is memory mapped and
+ * read the same way, for simplicity.
  *
  * Dmitry Brant, 2026
  */
@@ -26,22 +25,18 @@
 #define TICK_MS 30
 #define TASK_PRIORITY 4
 #define TASK_STACK 0x400 /* words */
-#define ROW_PAUSE_MS 2 /* the task pauses after each row, so the UI keeps running */
-#define HEAP_RESERVE 0x8000
-#define REAP_MS 20
+#define ROW_PAUSE_MS 2 /* the task pauses after each row, so the card stays free for others */
+#define IDLE_POLL_MS 10
 
 enum { PAL_GAP, PAL_UNREAD, PAL_ERROR, PAL_RAMP }; /* PAL_RAMP..255: entropy 0..8 bits */
 #define RAMP_LEVELS (256 - PAL_RAMP)
+enum { SCAN_STARTING, SCAN_READY, SCAN_NO_CARD, SCAN_NO_SIZE };
 
-/* Shared by the UI and the reader task, on the firmware heap. */
+/* The worker's memory, shared by the UI and the reader task. */
 typedef struct {
-	void *sd; /* NULL: read the flash */
-	void *task;
-	void *wake; /* given on a page change or to stop */
-	volatile bool stop;
-	volatile bool done; /* set by the task as its last action */
-	uint8_t reap_ticks;
-	uint8_t shift; /* log2 of the block size */
+	volatile uint8_t status; /* SCAN_*; the fields below are set once it is SCAN_READY */
+	void *sd;                /* NULL: read the flash */
+	uint8_t shift;           /* log2 of the block size */
 	uint32_t blocks;
 	volatile uint32_t page;     /* written by the UI */
 	volatile uint32_t progress; /* bumped by the task after each change to color[] */
@@ -53,7 +48,8 @@ typedef struct {
 
 typedef struct {
 	fw_overlay_t *ov;
-	scan_t *scan;
+	fw_worker_t *w;
+	scan_t *scan; /* the worker's memory, once it is ready */
 	lv_timer_t *timer;
 	lv_obj_t *img, *title, *info;
 	lv_img_dsc_t dsc;
@@ -137,11 +133,30 @@ static uint8_t block_color(scan_t *s, uint32_t block)
 	return (uint8_t)(PAL_RAMP + entropy_q16(s, data) * (RAMP_LEVELS - 1) / (8u << 16));
 }
 
-static void scan_task(void *arg)
+static void scan(fw_worker_t *w, bool flash)
 {
-	scan_t *s = arg;
+	scan_t *s = w->mem;
+	if (flash) {
+		s->shift = FLASH_SHIFT;
+		s->blocks = FW_FLASH_SIZE / FW_FLASH_SECTOR;
+	} else {
+		s->sd = FW_SD_NODE;
+		if (!fw_is_ram(s->sd)) {
+			s->status = SCAN_NO_CARD;
+			return;
+		}
+		s->shift = SD_SHIFT;
+		fw_sd_ioctl(FW_SD_SECTOR_COUNT, &s->blocks);
+		if (!s->blocks) {
+			s->status = SCAN_NO_SIZE;
+			return;
+		}
+	}
+	memset(s->color, PAL_UNREAD, PAGE);
+	__sync_synchronize();
+	s->status = SCAN_READY;
 	uint32_t page = 0, next = PAGE + 1; /* next block of the page to read; PAGE + 1: start over */
-	while (!s->stop) {
+	while (!w->stop) {
 		if (s->page != page || next > PAGE) {
 			page = s->page;
 			memset(s->color, PAL_UNREAD, PAGE);
@@ -149,28 +164,25 @@ static void scan_task(void *arg)
 			s->progress++;
 		}
 		if (next == PAGE) {
-			fw_sem_take(&s->wake, -1);
+			fw_os_sleep(IDLE_POLL_MS);
 			continue;
 		}
-		for (int col = 0; col < COLS && s->page == page && !s->stop; col++, next++) {
+		for (int col = 0; col < COLS && s->page == page && !w->stop; col++, next++) {
 			s->color[next] = block_color(s, page * PAGE + next);
 			s->progress++;
 		}
-		fw_sem_take(&s->wake, ROW_PAUSE_MS);
+		fw_os_sleep(ROW_PAUSE_MS);
 	}
-	s->done = true;
 }
 
-/* UI timer: frees the shared state once the task is done (see fw_mic_close). */
-static void reap(lv_timer_t *t)
+static void scan_sd(fw_worker_t *w)
 {
-	scan_t *s = t->user_data;
-	if (!s->done || s->reap_ticks++ == 0)
-		return;
-	fw_task_join(s->task);
-	fw_sem_delete(&s->wake);
-	fw_os_free(s);
-	lv_timer_del(t);
+	scan(w, false);
+}
+
+static void scan_flash(fw_worker_t *w)
+{
+	scan(w, true);
 }
 
 /* ---------------------------------------------------------------- UI */
@@ -216,12 +228,41 @@ static void show_page(app_t *app)
 	put_size(p, s->shift >= 10 ? s->blocks << (s->shift - 10) : s->blocks >> (10 - s->shift));
 	lv_label_set_text(app->info, text);
 	s->page = app->page;
-	fw_sem_give(&s->wake);
+}
+
+/* Sets up the grid once the worker has found the device's size. */
+static void start_view(app_t *app, scan_t *s)
+{
+	app->scan = s;
+	app->pages = (s->blocks + PAGE - 1) / PAGE;
+	uint8_t *px = s->px;
+	set_palette(px);
+	memset(px + PALETTE_SIZE, PAL_GAP, GRID_W * GRID_H);
+	app->dsc.header = LV_IMG_HEADER(LV_IMG_CF_INDEXED_8BIT, GRID_W, GRID_H);
+	app->dsc.data_size = sizeof(s->px);
+	app->dsc.data = px;
+	app->img = lv_img_create(app->ov->root);
+	lv_img_set_src(app->img, &app->dsc);
+	lv_obj_set_pos(app->img, 0, (lv_coord_t)((lv_disp_get_ver_res(NULL) - GRID_H) / 2));
+	app->drawn = s->progress - 1; /* draws the first frame */
+	show_page(app);
 }
 
 static void tick(lv_timer_t *t)
 {
 	app_t *app = t->user_data;
+	if (!app->scan) {
+		scan_t *s = fw_worker_mem(app->w);
+		if (fw_worker_failed(app->w))
+			lv_label_set_text(app->title, "Out of memory");
+		else if (s && s->status == SCAN_NO_CARD)
+			lv_label_set_text(app->title, "No SD card");
+		else if (s && s->status == SCAN_NO_SIZE)
+			lv_label_set_text(app->title, "SD card size unknown");
+		else if (s && s->status == SCAN_READY)
+			start_view(app, s);
+		return;
+	}
 	uint32_t progress = app->scan->progress;
 	if (progress == app->drawn)
 		return;
@@ -236,12 +277,7 @@ static void on_delete(void *ctx)
 	app_t *app = ctx;
 	if (app->timer)
 		lv_timer_del(app->timer);
-	scan_t *s = app->scan;
-	if (s) {
-		s->stop = true;
-		fw_sem_give(&s->wake);
-		lv_timer_create(reap, REAP_MS, s); /* if this fails, s and the task stay allocated */
-	}
+	fw_worker_release(app->w);
 	lv_mem_free(app);
 }
 
@@ -279,29 +315,6 @@ static void key_cb(lv_event_t *e)
 	}
 }
 
-/* Allocates the shared state and starts the reader task; NULL on failure. */
-static scan_t *start_scan(void *sd, uint8_t shift, uint32_t blocks)
-{
-	if (fw_os_heap_free() < sizeof(scan_t) + TASK_STACK * 4 + HEAP_RESERVE)
-		return NULL;
-	scan_t *s = fw_os_calloc(1, sizeof(scan_t));
-	if (!fw_is_ram(s))
-		return NULL;
-	s->sd = sd;
-	s->shift = shift;
-	s->blocks = blocks;
-	memset(s->color, PAL_UNREAD, PAGE);
-	s->wake = fw_sem_create();
-	if (fw_is_ram(s->wake)) {
-		s->task = fw_task_create(scan_task, s, "blockmap", TASK_PRIORITY, TASK_STACK);
-		if (fw_is_ram(s->task))
-			return s;
-		fw_sem_delete(&s->wake);
-	}
-	fw_os_free(s);
-	return NULL;
-}
-
 static void open_map(lv_obj_t *return_focus, bool flash)
 {
 	app_t *app = lv_mem_alloc(sizeof(app_t));
@@ -321,40 +334,11 @@ static void open_map(lv_obj_t *return_focus, bool flash)
 	lv_obj_set_pos(app->info, 2, (lv_coord_t)(h - 15));
 	lv_obj_add_event_cb(root, key_cb, LV_EVENT_KEY, app);
 
-	void *sd = NULL;
-	uint8_t shift = FLASH_SHIFT;
-	uint32_t blocks = FW_FLASH_SIZE / FW_FLASH_SECTOR;
-	if (!flash) {
-		sd = FW_SD_NODE;
-		if (!fw_is_ram(sd)) {
-			lv_label_set_text(app->title, "No SD card");
-			return;
-		}
-		shift = SD_SHIFT;
-		blocks = 0;
-		fw_sd_ioctl(FW_SD_SECTOR_COUNT, &blocks);
-	}
-	app->pages = (blocks + PAGE - 1) / PAGE;
-	if (!app->pages) {
-		lv_label_set_text(app->title, "SD card size unknown");
+	app->w = fw_worker_start(flash ? scan_flash : scan_sd, sizeof(scan_t), "blockmap", TASK_PRIORITY, TASK_STACK);
+	if (!app->w) {
+		lv_label_set_text(app->title, "Busy, try again");
 		return;
 	}
-	app->scan = start_scan(sd, shift, blocks);
-	if (!app->scan) {
-		lv_label_set_text(app->title, "Out of memory");
-		return;
-	}
-	uint8_t *px = app->scan->px;
-	set_palette(px);
-	memset(px + PALETTE_SIZE, PAL_GAP, GRID_W * GRID_H);
-	app->dsc.header = LV_IMG_HEADER(LV_IMG_CF_INDEXED_8BIT, GRID_W, GRID_H);
-	app->dsc.data_size = sizeof(app->scan->px);
-	app->dsc.data = px;
-	app->img = lv_img_create(root);
-	lv_img_set_src(app->img, &app->dsc);
-	lv_obj_set_pos(app->img, 0, (lv_coord_t)((h - GRID_H) / 2));
-	app->drawn = app->scan->progress - 1; /* draws the first frame */
-	show_page(app);
 	app->timer = lv_timer_create(tick, TICK_MS, app);
 }
 

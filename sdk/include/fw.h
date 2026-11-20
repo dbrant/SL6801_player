@@ -146,7 +146,13 @@ static inline lv_color_t lv_rgb(uint8_t r, uint8_t g, uint8_t b)
 #define lv_mem_alloc FW_FN(0x00D3909C, void *, (size_t size))
 #define lv_mem_free FW_FN(0x00D39030, void, (void *p))
 /* The LVGL heap is a 40 KB TLSF pool shared with the whole UI. The image cache is disabled
- * (LV_IMG_CACHE_DEF_SIZE 0), so images in RAM can be changed in place and redrawn. */
+ * (LV_IMG_CACHE_DEF_SIZE 0), so images in RAM can be changed in place and redrawn. When LVGL
+ * itself can't allocate (e.g. in lv_label_set_text), it spins forever and the UI freezes. */
+typedef struct {
+	uint32_t total_size, free_cnt, free_size, free_biggest_size, used_cnt, max_used;
+	uint8_t used_pct, frag_pct;
+} lv_mem_monitor_t;
+#define lv_mem_monitor FW_FN(0x00D3904C, void, (lv_mem_monitor_t * mon))
 
 #define lv_disp_get_layer_top FW_FN(0x00D27EF0, lv_obj_t *, (void *disp))
 #define lv_disp_get_scr_act FW_FN(0x00D27E88, lv_obj_t *, (void *disp))
@@ -243,8 +249,8 @@ static inline void lv_group_focus_freeze(lv_group_t *g, bool en)
 
 /* ---------------------------------------------------------------- files (FatFs R0.14b)
  * Long names as UTF-8, exFAT. "0:" is the SD card ("0:/dir/file"; '\' works too, and the drive
- * is optional). Each call locks the volume with a mutex, so calls are safe from any task, but
- * not from the UI task (see /dev/sd). The firmware mounts the card on insertion and unmounts it,
+ * is optional). Each call locks the volume with a mutex, so calls are safe from any task on CPU0,
+ * never from UI code on CPU1 (see sdk.h). The firmware mounts the card on insertion and unmounts it,
  * freeing its state without waiting for other users, on removal, USB card-reader mode and sleep.
  * So check fw_sd_mounted() before a batch of calls, keep files open only briefly, and treat
  * FR_NOT_ENABLED and FR_INVALID_OBJECT as "card gone". Up to 20 files and directories can be
@@ -326,10 +332,20 @@ enum { FW_AUDIO_IDLE, FW_AUDIO_PRIMING, FW_AUDIO_PLAYING, FW_AUDIO_STARVED };
 #define fw_sem_take FW_FN(0x00CD874C, int, (void **sem, int timeout_ms)) /* -1 on timeout; -1 ms waits forever */
 #define fw_sem_give FW_FN(0x00CD876E, void, (void **sem))
 #define fw_sem_delete FW_FN(0x00CD86E8, int, (void **sem))
+/* Software watchdog (0xD27B78): ViewTask (watch task 3) checks in once per loop and watch task 9
+ * once per message. When a watched task has not checked in since the last refresh, it logs
+ * "task %d (%s)is dead" and stops feeding /dev/wdog, which resets the player about 15 s later
+ * through the power management chip (RAM is lost). */
+#define fw_watch_checkin FW_FN(0x00D27C20, int, (void *watch_task))
+/* Opens /dev/wdog for the monitor; called once at startup by the firmware's first task (CPU0). */
+#define fw_watchdog_setup FW_FN(0x00D27AF0, void, (uint32_t a, uint32_t b, uint32_t c, uint32_t d))
+#define FW_CURRENT_TCB (*(const uint8_t *volatile *)0x00800A28u) /* CPU0's pxCurrentTCB */
 
 /* Volume as set by the user (low byte), and the software gain stage the video player applies to
  * 16-bit samples before writing them. */
 #define fw_audio_volume FW_FN(0x00CDF884, uint32_t, (void))
+/* Writes the current volume settings to the settings store in flash (PSMP); 1 on success. */
+#define fw_volume_save FW_FN(0x00CDF6DC, int, (void))
 #define fw_gain_create FW_FN(0x00D47BDC, void *, (int type, uint32_t rate, int channels, int bytes))
 #define fw_gain_apply FW_FN(0x00D47C10, void, (void *gain, uint32_t volume, void *buf, uint32_t frames))
 #define fw_gain_free FW_FN(0x00D47CB8, void, (void *gain))

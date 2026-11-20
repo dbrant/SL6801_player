@@ -28,6 +28,24 @@ bool fw_dev_busy(const char *name)
 	return false;
 }
 
+/* The worker is a plain struct here, already running with its memory. */
+fw_worker_t *fw_worker_start(void (*entry)(fw_worker_t *w), uint32_t mem_size, const char *name, int priority,
+			     uint32_t stack_words)
+{
+	(void)entry, (void)mem_size, (void)name, (void)priority, (void)stack_words;
+	return NULL;
+}
+
+void fw_worker_release(fw_worker_t *w)
+{
+	(void)w;
+}
+
+void *fw_worker_mem(const fw_worker_t *w)
+{
+	return w ? w->mem : NULL;
+}
+
 #include "sfx.h"
 
 static FILE *out;
@@ -39,7 +57,7 @@ static void put_period(const int16_t *buf)
 	frames += PERIOD;
 }
 
-static bool busy(fw_sound_t *s)
+static bool busy(sound_t *s)
 {
 	for (int k = 0; k < VOICES; k++)
 		if (s->voice[k].left)
@@ -47,10 +65,11 @@ static bool busy(fw_sound_t *s)
 	return false;
 }
 
-static void play(fw_sound_t *s, const char *name, const fw_tone_t *tones, uint8_t count)
+static void play(fw_worker_t *w, const char *name, const fw_tone_t *tones, uint8_t count)
 {
+	sound_t *s = w->mem;
 	printf("%6.2f s  %s\n", frames / (double)RATE, name);
-	fw_sound_play(s, tones, count);
+	fw_sound_play(w, tones, count);
 	do {
 		render(s);
 		put_period(s->buf);
@@ -83,9 +102,10 @@ int main(int argc, char **argv)
 	put_u16(16);
 	fwrite("data\0\0\0\0", 1, 8, out);
 
-	fw_sound_t *s = calloc(1, sizeof(*s));
+	sound_t *s = calloc(1, sizeof(*s));
 	s->lfsr = 0x2545F491u;
-#define X(name) play(s, #name, FW_SFX(name));
+	fw_worker_t w = {.state = FW_WORKER_RUNNING, .mem = s};
+#define X(name) play(&w, #name, FW_SFX(name));
 	SFX_ALL
 #undef X
 
