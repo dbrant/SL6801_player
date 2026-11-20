@@ -21,6 +21,12 @@ sdk_shared_t *sdk_shared(void)
 	return fw_is_ram(s) && s->magic == SHARED_MAGIC ? s : NULL;
 }
 
+void *volatile *fw_module_slot(unsigned i)
+{
+	sdk_shared_t *s = sdk_shared();
+	return s && i < FW_MODULE_SLOTS ? &s->modules[i] : NULL;
+}
+
 /* ---------------------------------------------------------------- CPU1 (UI) side */
 
 fw_worker_t *fw_worker_start(void (*entry)(fw_worker_t *w), uint32_t mem_size, const char *name, int priority,

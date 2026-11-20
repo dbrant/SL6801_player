@@ -462,3 +462,50 @@ typedef struct {
 
 /* Page 0x51 (page_expand_home_create, 2x3 icon grid) exists in the code but is not reachable
  * from the UI on this model. */
+
+/* Music "now playing" page (page id 4). Its state holds the labels; [1] is a child of the page's
+ * full-width container. Called from view_page_create at 0xD04ABA. */
+#define page_music_play_create FW_FN(0x00D12E64, int, (void))
+#define fw_music_play_page() (*(lv_obj_t ***)(FW_VIEW_CTX + 0xA0))
+
+/* Starts playing a file (MediaTask, CPU0): path and a type (3 for music). Called from 16 places
+ * in the media state machine (_media_*_process). */
+#define fw_media_start FW_FN(0x00D21800, int, (const char *path, uint32_t type))
+
+/* LVGL style properties, numbered as this build's lv_obj_init_draw_rect_dsc (0xD2ABA8) reads them
+ * (the background image ones lack the flag bits later LVGL versions add). */
+#define lv_obj_set_local_style_prop \
+	FW_FN(0x00D2DB28, void, (lv_obj_t * obj, uint32_t prop, uint32_t value, lv_style_selector_t s))
+#define lv_obj_get_style_prop FW_FN(0x00D2D950, uint32_t, (lv_obj_t * obj, uint32_t part, uint32_t prop))
+#define LV_STYLE_BG_OPA 0x21
+#define LV_STYLE_BG_IMG_SRC 0x26
+#define LV_STYLE_BG_IMG_OPA 0x27
+/* Background image, drawn centered on the object; NULL removes it. On the music page's container
+ * it covered the container's children (cause not found), so album art uses an lv_img child
+ * instead. */
+#define lv_obj_set_style_bg_img_src FW_FN(0x00D2E122, void, (lv_obj_t * obj, const void *src, lv_style_selector_t s))
+
+/* TJpgDec (R0.03 style, extended), used by the photo viewer. The state (FW_JD_SIZE bytes) is
+ * cleared by fw_jd_prepare except two words at 0xB8 and 0xBC. Output is RGB565 in native byte
+ * order (swap the bytes for LVGL), in blocks given as a rect of uint16 left, right, top, bottom.
+ * A progressive JPEG decodes from its first (DC) scan only, i.e. at 1/8 detail. Results: 0 ok,
+ * 1 stopped by the output callback, 2 input error, 3 pool too small, 6 bad data, 8 unsupported. */
+#define FW_JD_SIZE 0x118
+#define FW_JD_POOL 0xE00      /* work pool size the photo viewer gives */
+#define FW_JD_WIDTH 0x1C      /* uint16 */
+#define FW_JD_HEIGHT 0x1E     /* uint16 */
+#define FW_JD_DEVICE 0x7C     /* the dev pointer given to fw_jd_prepare */
+#define FW_JD_PROGRESSIVE 0x84 /* uint32, 1 for a progressive JPEG */
+/* uint32 flags that change what the input callback does: with FW_JD_TELL set, return the current
+ * position; with FW_JD_SEEK set, go to position n and return n. Both happen only while an APP1
+ * (Exif) segment is searched for a thumbnail, which fw_jd_prepare's skip_exif = 1 avoids. */
+#define FW_JD_TELL 0xA8
+#define FW_JD_SEEK 0xAC
+typedef uint32_t (*fw_jd_in_t)(void *jd, uint8_t *buf, uint32_t n); /* buf NULL: skip n bytes */
+typedef int (*fw_jd_out_t)(void *jd, void *bitmap, const uint16_t *rect); /* 0 stops */
+/* skip_exif 0: an Exif thumbnail of at least 96x120 is decoded instead of the main image, and a
+ * smaller one gives result 8 (the photo viewer then retries with 1). 1: APP1 segments are
+ * skipped. */
+#define fw_jd_prepare \
+	FW_FN(0x00CF1A20, int, (void *jd, fw_jd_in_t in, void *pool, uint32_t pool_size, void *dev, int skip_exif))
+#define fw_jd_decomp FW_FN(0x00CF1F90, int, (void *jd, fw_jd_out_t out, uint8_t scale)) /* 1/2^scale, 0-3 */

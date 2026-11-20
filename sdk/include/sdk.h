@@ -70,6 +70,12 @@ struct fw_worker {
 fw_worker_t *fw_worker_start(void (*entry)(fw_worker_t *w), uint32_t mem_size, const char *name, int priority,
 			     uint32_t stack_words);
 void fw_worker_release(fw_worker_t *w);
+/* Shared pointer slots for modules that keep state across pages and cores (app code has no
+ * writable globals). NULL before the service has started. Slot 0: album art. */
+#define FW_MODULE_SLOTS 4
+#define FW_MODULE_ALBUM_ART 0
+void *volatile *fw_module_slot(unsigned i);
+
 /* w->mem once the worker is RUNNING or DONE, else NULL (also for a NULL w). */
 void *fw_worker_mem(const fw_worker_t *w);
 /* True if the worker could not start (also for a NULL w). */

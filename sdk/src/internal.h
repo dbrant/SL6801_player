@@ -7,6 +7,7 @@ typedef struct {
 	uint32_t magic;
 	fw_worker_t workers[FW_WORKERS];
 	fw_blackbox_t *bb;
+	void *volatile modules[FW_MODULE_SLOTS];
 } sdk_shared_t;
 
 sdk_shared_t *sdk_shared(void);

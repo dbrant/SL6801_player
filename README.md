@@ -24,6 +24,8 @@ What works so far, all tested on the device:
   - *Pin monitor*: live GPIO levels.
   - *Files*: an SD card browser with a hex and text viewer.
   - *Crash log*: the black box that writes crash and hang reports to the SD card.
+- **Album art**: the music player shows the playing MP3's embedded cover behind its "now
+  playing" page.
 - **Flashing from Windows** over USB with `smtlink_dump`.
 - **Ghidra** project setup with ~350 firmware functions named automatically and 100 boot ROM
   functions named by hand, plus headless decompilation scripts.
@@ -45,6 +47,7 @@ built from it.
 - [Reference](#reference): [hardware](#hardware), [memory map](#memory-map),
   [flash layout](#flash-layout), [boot ROM](#boot-rom), [software stack](#software-stack),
   [assets](#assets-inside-firm), [two cores](#two-cores), [SDK internals](#sdk-internals), [audio](#audio),
+  [album art](#album-art),
   [recording](#recording), [SD card](#sd-card), [files](#files),
   [diagnostic apps](#diagnostic-apps), [buttons](#buttons-and-key-events), [Ghidra](#ghidra),
   [Windows flashing setup](#windows-flashing-setup)
@@ -65,7 +68,7 @@ The environment is Windows with Git Bash; paths below are the ones used here.
 Build the apps, pack them with the edited assets in `work/`, and flash:
 
 ```sh
-.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap sdk/apps/taskmon sdk/apps/bench sdk/apps/pinmon sdk/apps/files sdk/apps/crashlog
+.venv/Scripts/python sdk/build.py sdk/apps/flutter sdk/apps/mp3tris sdk/apps/mandel sdk/apps/fputest sdk/apps/keytest sdk/apps/soundtest sdk/apps/micscope sdk/apps/blockmap sdk/apps/taskmon sdk/apps/bench sdk/apps/pinmon sdk/apps/files sdk/apps/crashlog sdk/apps/albumart
 .venv/Scripts/python tools/assets.py pack firmware_2M.bin work out.bin --app sdk/build/app.json
 # put the player in bootloader mode, then:
 smartlink_flash/smtlink_dump.exe init write_flash 0 0 0 out.bin
@@ -94,6 +97,7 @@ To restore the stock firmware, flash `firmware_2M.bin` the same way.
 | `sdk/include/sdk.h`, `sdk/src/` | Shared app code: APP menu hook, full-screen overlay, CPU0 service and workers, black box, sound and mic, helpers, libc and compiler helpers (ROM) |
 | `sdk/app.ld`, `sdk/build.py`, `sdk/patches.json` | Linker script, build script, firmware call sites to patch |
 | `sdk/apps/flutter`, `mp3tris`, `mandel`, `fputest`, `keytest`, `soundtest`, `micscope`, `blockmap`, `taskmon`, `bench`, `pinmon`, `files`, `crashlog` | Apps |
+| `sdk/apps/albumart` | Album art behind the music player (firmware patches only, no menu row) |
 | `sdk/test/sfx_preview.c` | Renders an app's sound effects to a WAV file on the PC |
 | `ghidra/` | Headless Ghidra import and decompile scripts (`project/`, `input/`, `out/` are generated) |
 | `smartlink_flash/` | Local clone and build of the flasher (not in git) |
@@ -766,6 +770,43 @@ On failure, the allocation and task functions return `printf`'s return value ins
 It mixes up to 4 synthesized voices: square, triangle or noise, with a linear frequency slide and
 a decaying envelope. The games have no sound while the music player has the audio device open.
 Whether the music player keeps the device open while paused or stopped hasn't been tested yet.
+
+### Album art
+
+`sdk/apps/albumart` shows the playing MP3's embedded cover as the background of the "now
+playing" page (page 4). It has no menu row; its `patches.json` hooks two places:
+- **The playing file.** MediaTask starts every track with `fw_media_start(path, type)`
+  (0xD21800, 16 calls in the `_media_*_process` state handlers, type 3 for music). The hook
+  copies the path into a shared record (module slot `FW_MODULE_ALBUM_ART`) with a sequence count,
+  then calls the original. This runs on CPU0, in MediaTask, and only copies memory.
+- **The page.** The `bl page_music_play_create` (0xD12E64) at 0xD04ABA in `view_page_create`
+  goes to a hook that builds the page, then starts a worker. The page state at
+  `*(FW_VIEW_CTX) + 0xA0` holds its labels; their parent is the page's container, a full-screen
+  opaque object and the screen's only child. The cover is an `lv_img` that the hook moves to the
+  front of the container's children (`spec_attr` at +8 holds the child array and count; the
+  firmware has no `lv_obj_move_background`), so LVGL draws it before the labels. The page's
+  `LV_EVENT_DELETE` releases the worker.
+- Setting the cover as the container's background image (`lv_obj_set_style_bg_img_src`,
+  0xD2E122, property 0x26 in this LVGL) drew it over the labels instead; the cause wasn't found.
+  The background image ids are 0x26-0x2A here, as `lv_obj_init_draw_rect_dsc` (0xD2ABA8) reads
+  them, not LVGL 8.3's.
+
+The worker (about 47 KB on the firmware heap) waits for a new path, then:
+- **Finds the cover.** It scans the ID3v2 tag (versions 2.2 to 2.4, with unsynchronisation) for
+  APIC (or PIC) frames holding a JPEG, preferring the front cover (type 3). PNG pictures and
+  compressed or encrypted frames are skipped.
+- **Decodes it** with the firmware's own TJpgDec, the photo viewer's decoder (`fw_jd_prepare`
+  0xCF1A20, `fw_jd_decomp` 0xCF1F90; see `fw.h` for its state layout). It picks the largest
+  power-of-two reduction that still covers the screen. A progressive JPEG only decodes from its
+  first scan, at 1/8 detail. The firmware also has libjpeg, which the video player uses for
+  MJPEG; TJpgDec is simpler to drive and scales while decoding.
+  - This TJpgDec is extended for the photo viewer: in an APP1 (Exif) segment it looks for a
+    thumbnail, asking the input callback for its position and seeking back (flags at 0xA8 and
+    0xAC of its state). Its sixth argument 1 skips APP1 segments, which album art uses; with 0,
+    an Exif thumbnail of 96x120 or more is decoded instead of the picture.
+- **Draws it.** The output callback crops the picture around its center to fill 128x160, halves
+  its brightness so the labels stay readable, and swaps the RGB565 bytes for LVGL.
+- **Swaps covers safely.** Before overwriting a cover on screen, it has the UI hide it.
 
 ### Recording
 
