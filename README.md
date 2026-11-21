@@ -1,8 +1,14 @@
 # SL6801 MP3 player: firmware reverse engineering and custom apps
 
-Tools and notes for modifying the firmware of a cheap AliExpress MP3 player with a 1.8" color
+Tools and notes for modifying the firmware of a cheap AliExpress MP3 player with a 1.8" 128x160 color
 screen, built around a chip labeled "Jointbees MP3 R14181B6A0" (really a Smartlink **SL6801**).
 The vendor firmware is version `yp3_2.0.43`.
+
+|  |  |  |  |
+| --- | --- | --- | --- |
+|![Album art](./screenshot1.jpg)|![Flappy Bird clone](./screenshot2.jpg)|![Tetris clone](./screenshot3.jpg)|![Mandelbrot viewer](./screenshot4.jpg)|
+
+**Important**: This is only verified to work with the exact model device that I own. YMMV. If you have a "similar" device, but not exactly the same model, I would recommend telling your AI agent about this repo and asking it to use the _architectural_ findings in this repo, and apply the same kind of reverse-engineering on your device's firmware.
 
 What works so far, all tested on the device:
 
