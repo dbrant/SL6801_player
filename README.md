@@ -1066,7 +1066,7 @@ and 0xA3 and record code 0x92 from the table above.
 - **Driver.** In bootloader mode the device (`301A:2800`) binds to Windows' USB mass-storage
   driver. In Zadig, use Options > List All Devices and replace that driver with WinUSB for this
   VID/PID only. Card reader mode (`301A:2801`) is unaffected.
-- **Flasher.** [smartlink_flash](github.com/ilyakurdyukov/smartlink_flash).
+- **Flasher.** [smartlink_flash](https://github.com/ilyakurdyukov/smartlink_flash).
 - **Building it.** In MSYS2 UCRT64, run `pacman -S mingw-w64-ucrt-x86_64-libusb make`, then
   `make CC=gcc` from a UCRT64 shell. Copy `libusb-1.0.dll` next to `smtlink_dump.exe` so it runs
   from any shell.
