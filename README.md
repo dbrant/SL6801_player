@@ -8,6 +8,8 @@ The vendor firmware is version `yp3_2.0.43`.
 | --- | --- | --- | --- |
 |![Album art](./screenshot1.jpg)|![Flappy Bird clone](./screenshot2.jpg)|![Tetris clone](./screenshot3.jpg)|![Mandelbrot viewer](./screenshot4.jpg)|
 
+**TLDR**: [Download](./out.bin) the modified firmware and [flash](#flashing) your device with it!
+
 **Important**: This is only verified to work with the exact model device that I own. YMMV. If you have a "similar" device, but not exactly the same model, I would recommend telling your AI agent about this repo and asking it to use the _architectural_ findings in this repo, and apply the same kind of reverse-engineering on your device's firmware.
 
 What works so far, all tested on the device:
